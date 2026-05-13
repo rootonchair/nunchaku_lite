@@ -17,32 +17,17 @@ import torch.nn.functional as F
 from ..core import PatchOptions, register_adapter
 from ..models.linear import AWQW4A16Linear, SVDQW4A4Linear
 from ..ops.fused import fused_gelu_mlp, fused_qkv_norm_rotary
-from ..utils import convert_fp16, patch_scale_key
-
-
-def fuse_linears(linears: list[nn.Linear]) -> nn.Linear:
-    if not linears:
-        raise ValueError("fuse_linears requires at least one linear layer")
-    if len(linears) == 1:
-        return linears[0]
-    if not all(linear.in_features == linears[0].in_features for linear in linears):
-        raise ValueError("All linear layers must share the same input feature dimension")
-    return nn.Linear(
-        linears[0].in_features,
-        sum(linear.out_features for linear in linears),
-        bias=all(linear.bias is not None for linear in linears),
-        dtype=linears[0].weight.dtype,
-        device=linears[0].weight.device,
-    )
-
-
-def patch_linear(module: nn.Module, linear_cls, **kwargs) -> nn.Module:
-    for name, child in module.named_children():
-        if isinstance(child, nn.Linear):
-            setattr(module, name, linear_cls.from_linear(child, **kwargs))
-        else:
-            patch_linear(child, linear_cls, **kwargs)
-    return module
+from .common import (
+    SVDQPatchContext,
+    build_svdq_context,
+    finalize_svdq_checkpoint,
+    fuse_linears,
+    pack_rotemb,
+    pad_tensor,
+    patch_svdq_linears,
+    prepare_transformer_dtype,
+    svdq_from_linear,
+)
 
 
 def rope(pos: torch.Tensor, dim: int, theta: int) -> torch.Tensor:
@@ -69,34 +54,6 @@ class LiteFluxPosEmbed(nn.Module):
         n_axes = ids.shape[-1]
         emb = torch.cat([rope(ids[..., i], self.axes_dim[i], self.theta) for i in range(n_axes)], dim=-3)
         return emb.unsqueeze(1)
-
-
-def pack_rotemb(rotemb: torch.Tensor) -> torch.Tensor:
-    if rotemb.dtype != torch.float32:
-        raise ValueError("Packed rotary embeddings require float32 input")
-    batch = rotemb.shape[0]
-    seq_len = rotemb.shape[1]
-    dim = rotemb.shape[2] * 2
-    if rotemb.shape != (batch, seq_len, dim // 2, 1, 2):
-        raise ValueError("Unexpected rotary embedding shape")
-    if seq_len % 16 != 0 or dim % 8 != 0:
-        raise ValueError("Rotary embedding sequence length must be divisible by 16 and dim by 8")
-    rotemb = rotemb.reshape(batch, seq_len // 16, 16, dim // 8, 8)
-    rotemb = rotemb.permute(0, 1, 3, 2, 4)
-    rotemb = rotemb.reshape(*rotemb.shape[0:3], 2, 8, 4, 2)
-    rotemb = rotemb.permute(0, 1, 2, 4, 5, 3, 6).contiguous()
-    return rotemb.view(batch, seq_len, dim)
-
-
-def pad_tensor(tensor: torch.Tensor, multiple: int, dim: int) -> torch.Tensor:
-    if tensor.shape[dim] % multiple == 0:
-        return tensor
-    shape = list(tensor.shape)
-    shape[dim] = ((shape[dim] + multiple - 1) // multiple) * multiple
-    result = torch.zeros(shape, dtype=tensor.dtype, device=tensor.device)
-    slices = tuple(slice(0, extent) for extent in tensor.shape)
-    result[slices] = tensor
-    return result
 
 
 def prepare_flux_rotary(
@@ -288,7 +245,13 @@ class LiteFluxAttnProcessor(nn.Module):
 
 
 class LiteFluxAttention(nn.Module):
-    def __init__(self, other: FluxAttention, processor: str | nn.Module | None = None, **kwargs):
+    def __init__(
+        self,
+        other: FluxAttention,
+        processor: str | nn.Module | None = None,
+        context: SVDQPatchContext | None = None,
+        **kwargs,
+    ):
         super().__init__()
         self.head_dim = other.head_dim
         self.inner_dim = other.inner_dim
@@ -306,19 +269,19 @@ class LiteFluxAttention(nn.Module):
         self.norm_k = other.norm_k
         with torch.device("meta"):
             to_qkv = fuse_linears([other.to_q, other.to_k, other.to_v])
-        self.to_qkv = SVDQW4A4Linear.from_linear(to_qkv, **kwargs)
+        self.to_qkv = svdq_from_linear(to_qkv, context, **kwargs)
 
         if not self.pre_only:
             self.to_out = other.to_out
-            self.to_out[0] = SVDQW4A4Linear.from_linear(self.to_out[0], **kwargs)
+            self.to_out[0] = svdq_from_linear(self.to_out[0], context, **kwargs)
 
         if self.added_kv_proj_dim is not None:
             self.norm_added_q = other.norm_added_q
             self.norm_added_k = other.norm_added_k
             with torch.device("meta"):
                 add_qkv_proj = fuse_linears([other.add_q_proj, other.add_k_proj, other.add_v_proj])
-            self.add_qkv_proj = SVDQW4A4Linear.from_linear(add_qkv_proj, **kwargs)
-            self.to_add_out = SVDQW4A4Linear.from_linear(other.to_add_out, **kwargs)
+            self.add_qkv_proj = svdq_from_linear(add_qkv_proj, context, **kwargs)
+            self.to_add_out = svdq_from_linear(other.to_add_out, context, **kwargs)
 
         self.set_processor(other.processor if processor is None else processor)
 
@@ -359,9 +322,9 @@ class LiteFluxAttention(nn.Module):
 
 
 class LiteFluxFeedForward(nn.Module):
-    def __init__(self, ff: nn.Module, **kwargs):
+    def __init__(self, ff: nn.Module, context: SVDQPatchContext | None = None, **kwargs):
         super().__init__()
-        self.net = patch_linear(ff.net, SVDQW4A4Linear, **kwargs)
+        self.net = patch_svdq_linears(ff.net, context, **kwargs)
         if len(self.net) > 2 and isinstance(self.net[2], SVDQW4A4Linear):
             self.net[2].act_unsigned = self.net[2].precision != "nvfp4"
 
@@ -379,18 +342,24 @@ class LiteFluxFeedForward(nn.Module):
 
 
 class LiteFluxTransformerBlock(nn.Module):
-    def __init__(self, block: FluxTransformerBlock, scale_shift: float = 0.0, **kwargs):
+    def __init__(
+        self,
+        block: FluxTransformerBlock,
+        scale_shift: float = 0.0,
+        context: SVDQPatchContext | None = None,
+        **kwargs,
+    ):
         super().__init__()
-        torch_dtype = kwargs.get("torch_dtype", torch.bfloat16)
+        torch_dtype = context.torch_dtype if context is not None else kwargs.get("torch_dtype", torch.bfloat16)
         self.norm1 = LiteAdaLayerNormZero(block.norm1, scale_shift=scale_shift, torch_dtype=torch_dtype)
         self.norm1_context = LiteAdaLayerNormZero(
             block.norm1_context, scale_shift=scale_shift, torch_dtype=torch_dtype
         )
-        self.attn = LiteFluxAttention(block.attn, **kwargs)
+        self.attn = LiteFluxAttention(block.attn, context=context, **kwargs)
         self.norm2 = block.norm2
         self.norm2_context = block.norm2_context
-        self.ff = LiteFluxFeedForward(block.ff, **kwargs)
-        self.ff_context = LiteFluxFeedForward(block.ff_context, **kwargs)
+        self.ff = LiteFluxFeedForward(block.ff, context=context, **kwargs)
+        self.ff_context = LiteFluxFeedForward(block.ff_context, context=context, **kwargs)
 
     def forward(
         self,
@@ -439,17 +408,23 @@ class LiteFluxTransformerBlock(nn.Module):
 
 
 class LiteFluxSingleTransformerBlock(nn.Module):
-    def __init__(self, block: FluxSingleTransformerBlock, scale_shift: float = 0.0, **kwargs):
+    def __init__(
+        self,
+        block: FluxSingleTransformerBlock,
+        scale_shift: float = 0.0,
+        context: SVDQPatchContext | None = None,
+        **kwargs,
+    ):
         super().__init__()
-        torch_dtype = kwargs.get("torch_dtype", torch.bfloat16)
+        torch_dtype = context.torch_dtype if context is not None else kwargs.get("torch_dtype", torch.bfloat16)
         self.mlp_hidden_dim = block.mlp_hidden_dim
         self.norm = LiteAdaLayerNormZeroSingle(block.norm, scale_shift=scale_shift, torch_dtype=torch_dtype)
-        self.mlp_fc1 = SVDQW4A4Linear.from_linear(block.proj_mlp, **kwargs)
+        self.mlp_fc1 = svdq_from_linear(block.proj_mlp, context, **kwargs)
         self.act_mlp = block.act_mlp
-        self.mlp_fc2 = SVDQW4A4Linear.from_linear(block.proj_out, in_features=self.mlp_hidden_dim, **kwargs)
+        self.mlp_fc2 = svdq_from_linear(block.proj_out, context, in_features=self.mlp_hidden_dim, **kwargs)
         self.mlp_fc2.act_unsigned = self.mlp_fc2.precision != "nvfp4"
-        self.attn = LiteFluxAttention(block.attn, **kwargs)
-        self.attn.to_out = SVDQW4A4Linear.from_linear(block.proj_out, in_features=self.mlp_fc1.in_features, **kwargs)
+        self.attn = LiteFluxAttention(block.attn, context=context, **kwargs)
+        self.attn.to_out = svdq_from_linear(block.proj_out, context, in_features=self.mlp_fc1.in_features, **kwargs)
 
     def forward(
         self,
@@ -499,25 +474,19 @@ class FluxAdapter:
         quantization_config: dict[str, Any],
         options: PatchOptions,
     ) -> dict[str, torch.Tensor]:
-        rank = int(options.adapter_options.get("rank", quantization_config.get("rank", 32)))
-        torch_dtype = options.torch_dtype or next(transformer.parameters()).dtype
-        if options.torch_dtype is not None:
-            transformer.to(options.torch_dtype)
-
-        kwargs = {"precision": options.precision, "rank": rank, "torch_dtype": torch_dtype}
+        context = build_svdq_context(transformer, quantization_config, options)
+        prepare_transformer_dtype(transformer, context)
         axes_dim = tuple(getattr(transformer.pos_embed, "axes_dim", transformer.config.axes_dims_rope))
         transformer.pos_embed = LiteFluxPosEmbed(dim=transformer.inner_dim, theta=10000, axes_dim=axes_dim)
         for index, block in enumerate(transformer.transformer_blocks):
-            transformer.transformer_blocks[index] = LiteFluxTransformerBlock(block, scale_shift=0.0, **kwargs)
+            transformer.transformer_blocks[index] = LiteFluxTransformerBlock(block, scale_shift=0.0, context=context)
         for index, block in enumerate(transformer.single_transformer_blocks):
             transformer.single_transformer_blocks[index] = LiteFluxSingleTransformerBlock(
-                block, scale_shift=0.0, **kwargs
+                block, scale_shift=0.0, context=context
             )
 
         checkpoint_state = convert_flux_state_dict(checkpoint_state)
-        patch_scale_key(transformer, checkpoint_state)
-        if torch_dtype == torch.float16:
-            convert_fp16(transformer, checkpoint_state)
+        finalize_svdq_checkpoint(transformer, checkpoint_state, context)
         transformer._nunchaku_lite_flux_patched = True
         return checkpoint_state
 

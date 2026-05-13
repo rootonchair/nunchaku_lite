@@ -17,11 +17,20 @@ from diffusers.models.transformers.transformer_flux2 import (
 )
 
 from ..core import PatchOptions, register_adapter
-from ..models.linear import SVDQW4A4Linear
 from ..ops.attention import attention_fp16_cuda
 from ..ops.fused import fused_qkv_norm_rotary
-from ..utils import convert_fp16, pad_tensor, patch_scale_key
-from .flux import fuse_linears, pack_rotemb
+from .common import (
+    SVDQPatchContext,
+    alloc_packed_qkv as _alloc_packed_qkv,
+    apply_gated_residual as _apply_gated_residual,
+    build_svdq_context,
+    finalize_svdq_checkpoint,
+    fuse_linears,
+    pack_rotemb,
+    pad_tensor,
+    prepare_transformer_dtype,
+    svdq_from_linear,
+)
 
 
 def _pack_flux2_rotary_emb(freqs_cis: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
@@ -31,28 +40,6 @@ def _pack_flux2_rotary_emb(freqs_cis: tuple[torch.Tensor, torch.Tensor]) -> torc
 
     rotemb = torch.stack([sin[:, 0::2], cos[:, 0::2]], dim=-1).unsqueeze(0).unsqueeze(-2).contiguous()
     return pack_rotemb(pad_tensor(rotemb, 256, 1))
-
-
-def _alloc_packed_qkv(
-    batch_size: int,
-    heads: int,
-    num_tokens: int,
-    head_dim: int,
-    device: torch.device,
-    pad_size: int = 256,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
-    num_tokens_pad = math.ceil(num_tokens / pad_size) * pad_size
-    query = torch.empty(batch_size, heads, num_tokens_pad, head_dim, dtype=torch.float16, device=device)
-    key = torch.empty_like(query)
-    value = torch.empty_like(query)
-    return query, key, value, num_tokens_pad
-
-
-def _apply_gated_residual(residual: torch.Tensor, gate: torch.Tensor, update: torch.Tensor) -> torch.Tensor:
-    if torch.is_grad_enabled():
-        return residual + gate * update
-    residual.addcmul_(gate, update)
-    return residual
 
 
 def _flux2_kv_causal_attention(
@@ -96,7 +83,7 @@ def _flux2_kv_causal_attention(
 
 
 class LiteFlux2Attention(nn.Module):
-    def __init__(self, other: Flux2Attention, **kwargs):
+    def __init__(self, other: Flux2Attention, context: SVDQPatchContext | None = None, **kwargs):
         super().__init__()
         self.head_dim = other.head_dim
         self.inner_dim = other.inner_dim
@@ -114,18 +101,18 @@ class LiteFlux2Attention(nn.Module):
         self.norm_q = other.norm_q
         self.norm_k = other.norm_k
         self.to_out = other.to_out
-        self.to_out[0] = SVDQW4A4Linear.from_linear(self.to_out[0], **kwargs)
+        self.to_out[0] = svdq_from_linear(self.to_out[0], context, **kwargs)
         with torch.device("meta"):
             to_qkv = fuse_linears([other.to_q, other.to_k, other.to_v])
-        self.to_qkv = SVDQW4A4Linear.from_linear(to_qkv, **kwargs)
+        self.to_qkv = svdq_from_linear(to_qkv, context, **kwargs)
 
         if self.added_kv_proj_dim is not None:
             self.norm_added_q = other.norm_added_q
             self.norm_added_k = other.norm_added_k
-            self.to_add_out = SVDQW4A4Linear.from_linear(other.to_add_out, **kwargs)
+            self.to_add_out = svdq_from_linear(other.to_add_out, context, **kwargs)
             with torch.device("meta"):
                 to_added_qkv = fuse_linears([other.add_q_proj, other.add_k_proj, other.add_v_proj])
-            self.to_added_qkv = SVDQW4A4Linear.from_linear(to_added_qkv, **kwargs)
+            self.to_added_qkv = svdq_from_linear(to_added_qkv, context, **kwargs)
 
     def forward(
         self,
@@ -301,11 +288,11 @@ class LiteFlux2Attention(nn.Module):
 
 
 class LiteFlux2FeedForward(nn.Module):
-    def __init__(self, other: Flux2FeedForward, **kwargs):
+    def __init__(self, other: Flux2FeedForward, context: SVDQPatchContext | None = None, **kwargs):
         super().__init__()
-        self.linear_in = SVDQW4A4Linear.from_linear(other.linear_in, **kwargs)
+        self.linear_in = svdq_from_linear(other.linear_in, context, **kwargs)
         self.act_fn = other.act_fn
-        self.linear_out = SVDQW4A4Linear.from_linear(other.linear_out, **kwargs)
+        self.linear_out = svdq_from_linear(other.linear_out, context, **kwargs)
         self.linear_out.act_unsigned = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -315,7 +302,7 @@ class LiteFlux2FeedForward(nn.Module):
 
 
 class LiteFlux2ParallelSelfAttention(nn.Module):
-    def __init__(self, other: Flux2ParallelSelfAttention, **kwargs):
+    def __init__(self, other: Flux2ParallelSelfAttention, context: SVDQPatchContext | None = None, **kwargs):
         super().__init__()
         self.head_dim = other.head_dim
         self.inner_dim = other.inner_dim
@@ -337,13 +324,13 @@ class LiteFlux2ParallelSelfAttention(nn.Module):
             out_proj = nn.Linear(other.inner_dim, other.out_dim, bias=other.to_out.bias is not None)
             mlp_fc2 = nn.Linear(other.mlp_hidden_dim, other.out_dim, bias=other.to_out.bias is not None)
         device = other.to_qkv_mlp_proj.weight.device
-        self.qkv_proj = SVDQW4A4Linear.from_linear(qkv_proj, device=device, **kwargs)
-        self.mlp_fc1 = SVDQW4A4Linear.from_linear(mlp_fc1, device=device, **kwargs)
+        self.qkv_proj = svdq_from_linear(qkv_proj, context, device=device, **kwargs)
+        self.mlp_fc1 = svdq_from_linear(mlp_fc1, context, device=device, **kwargs)
         self.mlp_act_fn = other.mlp_act_fn
         self.norm_q = other.norm_q
         self.norm_k = other.norm_k
-        self.out_proj = SVDQW4A4Linear.from_linear(out_proj, device=device, **kwargs)
-        self.mlp_fc2 = SVDQW4A4Linear.from_linear(mlp_fc2, device=device, **kwargs)
+        self.out_proj = svdq_from_linear(out_proj, context, device=device, **kwargs)
+        self.mlp_fc2 = svdq_from_linear(mlp_fc2, context, device=device, **kwargs)
         self.mlp_fc2.act_unsigned = False
 
     def forward(
@@ -437,16 +424,16 @@ class LiteFlux2ParallelSelfAttention(nn.Module):
 
 
 class LiteFlux2TransformerBlock(nn.Module):
-    def __init__(self, block: Flux2TransformerBlock, **kwargs):
+    def __init__(self, block: Flux2TransformerBlock, context: SVDQPatchContext | None = None, **kwargs):
         super().__init__()
         self.mlp_hidden_dim = block.mlp_hidden_dim
         self.norm1 = block.norm1
         self.norm1_context = block.norm1_context
-        self.attn = LiteFlux2Attention(block.attn, **kwargs)
+        self.attn = LiteFlux2Attention(block.attn, context=context, **kwargs)
         self.norm2 = block.norm2
-        self.ff = LiteFlux2FeedForward(block.ff, **kwargs)
+        self.ff = LiteFlux2FeedForward(block.ff, context=context, **kwargs)
         self.norm2_context = block.norm2_context
-        self.ff_context = LiteFlux2FeedForward(block.ff_context, **kwargs)
+        self.ff_context = LiteFlux2FeedForward(block.ff_context, context=context, **kwargs)
 
     def forward(
         self,
@@ -492,10 +479,10 @@ class LiteFlux2TransformerBlock(nn.Module):
 
 
 class LiteFlux2SingleTransformerBlock(nn.Module):
-    def __init__(self, block: Flux2SingleTransformerBlock, **kwargs):
+    def __init__(self, block: Flux2SingleTransformerBlock, context: SVDQPatchContext | None = None, **kwargs):
         super().__init__()
         self.norm = block.norm
-        self.attn = LiteFlux2ParallelSelfAttention(block.attn, **kwargs)
+        self.attn = LiteFlux2ParallelSelfAttention(block.attn, context=context, **kwargs)
 
     def forward(
         self,
@@ -654,22 +641,16 @@ class Flux2Adapter:
         quantization_config: dict[str, Any],
         options: PatchOptions,
     ) -> dict[str, torch.Tensor]:
-        rank = int(options.adapter_options.get("rank", quantization_config.get("rank", 32)))
-        torch_dtype = options.torch_dtype or next(transformer.parameters()).dtype
-        if options.torch_dtype is not None:
-            transformer.to(options.torch_dtype)
-
-        kwargs = {"precision": options.precision, "rank": rank, "torch_dtype": torch_dtype}
+        context = build_svdq_context(transformer, quantization_config, options)
+        prepare_transformer_dtype(transformer, context)
         for index, block in enumerate(transformer.transformer_blocks):
-            transformer.transformer_blocks[index] = LiteFlux2TransformerBlock(block, **kwargs)
+            transformer.transformer_blocks[index] = LiteFlux2TransformerBlock(block, context=context)
         for index, block in enumerate(transformer.single_transformer_blocks):
-            transformer.single_transformer_blocks[index] = LiteFlux2SingleTransformerBlock(block, **kwargs)
+            transformer.single_transformer_blocks[index] = LiteFlux2SingleTransformerBlock(block, context=context)
 
         transformer._nunchaku_lite_flux2_original_forward = transformer.forward
         transformer.forward = types.MethodType(lite_flux2_forward, transformer)
-        patch_scale_key(transformer, checkpoint_state)
-        if torch_dtype == torch.float16:
-            convert_fp16(transformer, checkpoint_state)
+        finalize_svdq_checkpoint(transformer, checkpoint_state, context)
         transformer._nunchaku_lite_flux2_patched = True
         return checkpoint_state
 
