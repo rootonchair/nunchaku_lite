@@ -7,6 +7,10 @@
       <stop offset="0" stop-color="#00e0c6"/>
       <stop offset="1" stop-color="#4f7cff"/>
     </linearGradient>
+    <linearGradient id="lite-bg" x1="80" y1="45" x2="950" y2="245" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#dbe4ee"/>
+      <stop offset="1" stop-color="#f2f5f9"/>
+    </linearGradient>
     <style>
       .ink {
         fill: #10141f;
@@ -57,6 +61,8 @@
       }
     </style>
   </defs>
+
+  <rect x="80" y="45" width="870" height="200" rx="28" fill="url(#lite-bg)" opacity=".14"/>
 
   <g transform="translate(42 28)">
     <path class="handle-accent" d="M84 82c24-17 59-15 76 16"/>
