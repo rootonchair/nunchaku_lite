@@ -241,8 +241,8 @@ from nunchaku_lite import register_adapter
 from nunchaku_lite.adapters.common import (
     build_svdq_context,
     finalize_svdq_checkpoint,
+    patch_modules_recursively,
     prepare_transformer_dtype,
-    svdq_from_linear,
 )
 
 
@@ -256,8 +256,20 @@ class MyModelAdapter:
         context = build_svdq_context(transformer, quantization_config, options)
         prepare_transformer_dtype(transformer, context)
 
-        # Replace or wrap the model-specific modules here.
-        transformer.block.attn.to_qkv = svdq_from_linear(transformer.block.attn.to_qkv, context)
+        # Recursively replace generic Diffusers Attention children and
+        # checkpoint-backed dense linear children.
+        patch_modules_recursively(
+            transformer,
+            context,
+            attention_processor_factory=lambda path, attention: MyAttentionProcessor(),
+            linear_filter=lambda path, linear: path.startswith("blocks."),
+            module_converters={
+                MyFeedForwardBlock: convert_my_feed_forward_block,
+            },
+            custom_attention_converters={
+                MyAttentionSubclass: lambda attention: MyLiteAttention(attention, context=context),
+            },
+        )
 
         # Normalize checkpoint keys here only if this model's checkpoint layout needs it.
         finalize_svdq_checkpoint(transformer, checkpoint_state, context)
@@ -269,11 +281,13 @@ register_adapter(MyModelAdapter())
 
 Adapter responsibilities:
 
-- Use `build_svdq_context`, `svdq_from_linear`, `patch_svdq_linears`, and `finalize_svdq_checkpoint` for rank, precision, dtype, scale-key patching, and fp16 checkpoint conversion.
+- Use `build_svdq_context`, `patch_modules_recursively`, `svdq_from_linear`, `patch_svdq_linears`, and `finalize_svdq_checkpoint` for rank, precision, dtype, recursive module replacement, scale-key patching, and fp16 checkpoint conversion.
 - Keep graph-specific rewrites in the adapter, including QKV fusion, MLP fusion, module renaming, and any synthetic projection modules required to match checkpoint keys.
 - Keep rotary embedding preparation, packed attention paths, KV-cache behavior, and custom forward wrappers model-specific.
 - Add the adapter import in `nunchaku_lite.core._ensure_builtin_adapters()` if it should be built in.
 - Add focused tests that build a tiny Diffusers transformer, patch it from a synthetic safetensors checkpoint, and verify expected module names and state dict keys.
+
+`patch_modules_recursively` mutates the selected module tree in place and returns a `ModulePatchReport` with replacement and skip counts. Use `linear_filter` or narrow roots so only checkpoint-backed dense projections are replaced. Use `module_converters` for exact-class model blocks that can be normalized before descending. Use `custom_attention_converters` for Diffusers `Attention` subclasses that require a model-specific replacement; unsupported attention subclasses now raise `TypeError` instead of being silently skipped.
 
 Avoid adding a pipeline subclass for a new model unless the upstream Diffusers pipeline itself requires one. The preferred integration is still `patch_transformer(pipe.transformer, checkpoint, target="...")`.
 

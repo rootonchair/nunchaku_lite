@@ -7,7 +7,7 @@ from safetensors.torch import save_file
 from diffusers import FluxTransformer2DModel
 from diffusers.models.transformers.transformer_flux import FluxIPAdapterAttnProcessor
 from nunchaku_lite import patch_transformer
-from nunchaku_lite.adapters.flux import FluxAdapter, LiteFluxAttention, LiteFluxAttnProcessor, convert_flux_state_dict
+from nunchaku_lite.adapters.flux import FluxAdapter, NunchakuFluxAttention, NunchakuFluxAttnProcessor, convert_flux_state_dict
 
 
 def make_tiny_flux_transformer():
@@ -71,9 +71,9 @@ def test_patch_transformer_patches_flux_from_synthetic_checkpoint(tmp_path):
     assert returned is transformer
     assert transformer._nunchaku_lite_patched
     assert transformer._nunchaku_lite_target == "flux"
-    assert transformer.transformer_blocks[0].__class__.__name__ == "LiteFluxTransformerBlock"
-    assert transformer.single_transformer_blocks[0].__class__.__name__ == "LiteFluxSingleTransformerBlock"
-    assert transformer.transformer_blocks[0].attn.__class__.__name__ == "LiteFluxAttention"
+    assert transformer.transformer_blocks[0].__class__.__name__ == "NunchakuFluxTransformerBlock"
+    assert transformer.single_transformer_blocks[0].__class__.__name__ == "NunchakuFluxSingleTransformerBlock"
+    assert transformer.transformer_blocks[0].attn.__class__.__name__ == "NunchakuFluxAttention"
 
 
 def test_patch_transformer_is_idempotent_for_flux(tmp_path):
@@ -111,9 +111,9 @@ def test_flux_attention_wraps_ip_adapter_processor():
         dtype=torch.bfloat16,
     )
 
-    attn = LiteFluxAttention(base, processor=ip_processor, precision="int4", rank=4, torch_dtype=torch.bfloat16)
+    attn = NunchakuFluxAttention(base, processor=ip_processor, precision="int4", rank=4, torch_dtype=torch.bfloat16)
 
-    assert isinstance(attn.processor, LiteFluxAttnProcessor)
+    assert isinstance(attn.processor, NunchakuFluxAttnProcessor)
     assert attn.processor.supports_ip_adapter
     assert len(attn.processor.to_k_ip) == 1
     assert len(attn.processor.to_v_ip) == 1

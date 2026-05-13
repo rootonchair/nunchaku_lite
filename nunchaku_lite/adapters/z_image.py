@@ -18,7 +18,7 @@ from .common import (
     finalize_svdq_checkpoint,
     pack_rotemb,
     pad_tensor,
-    patch_module_tree,
+    patch_modules_recursively,
     prepare_transformer_dtype,
 )
 
@@ -201,7 +201,7 @@ class ZImageAdapter:
             None.
         """
 
-        patch_module_tree(
+        patch_modules_recursively(
             transformer,
             context,
             attention_processor_factory=lambda _path, _attention: ZImageSingleStreamAttnProcessor(),
@@ -240,7 +240,7 @@ class ZImageAdapter:
             path: Dot-separated module path produced by the recursive
                 traversal.
             module: Child module currently being considered by
-                :func:`patch_module_tree`.
+                :func:`patch_modules_recursively`.
             skip_refiners: Whether refiner attention should remain dense.
 
         Returns:

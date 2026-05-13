@@ -11,7 +11,7 @@ from diffusers.models.attention_processor import Attention
 from diffusers.models.transformers.transformer_z_image import FeedForward as DiffusersZImageFeedForward
 from diffusers.models.transformers.transformer_z_image import ZImageTransformer2DModel
 from nunchaku_lite import patch_transformer
-from nunchaku_lite.adapters.common import NunchakuAttention, patch_attention_module, patch_module_tree
+from nunchaku_lite.adapters.common import NunchakuAttention, patch_attention_module, patch_modules_recursively
 from nunchaku_lite.adapters.z_image import ZImageAdapter
 from nunchaku_lite.models.linear import SVDQW4A4Linear
 
@@ -143,7 +143,7 @@ def test_patch_attention_module_rejects_non_diffusers_attention():
         patch_attention_module(AttentionLike(), object())
 
 
-def test_patch_module_tree_replaces_exact_attention_and_filtered_linears():
+def test_patch_modules_recursively_replaces_exact_attention_and_filtered_linears():
     class Wrapper(nn.Module):
         def __init__(self):
             super().__init__()
@@ -152,7 +152,7 @@ def test_patch_module_tree_replaces_exact_attention_and_filtered_linears():
             self.modulation = nn.Linear(8, 8)
 
     module = Wrapper()
-    report = patch_module_tree(
+    report = patch_modules_recursively(
         module,
         attention_processor_factory=lambda _path, _attention: object(),
         linear_filter=lambda path, _linear: path.startswith("feed_forward."),
@@ -166,7 +166,7 @@ def test_patch_module_tree_replaces_exact_attention_and_filtered_linears():
     assert isinstance(module.modulation, nn.Linear)
 
 
-def test_patch_module_tree_applies_module_converters_before_descending():
+def test_patch_modules_recursively_applies_module_converters_before_descending():
     def convert_z_image_ff(module):
         return FeedForward(
             dim=module.w1.in_features,
@@ -183,7 +183,7 @@ def test_patch_module_tree_applies_module_converters_before_descending():
             self.feed_forward = DiffusersZImageFeedForward(dim=8, hidden_dim=16)
 
     module = Wrapper()
-    report = patch_module_tree(
+    report = patch_modules_recursively(
         module,
         module_converters={DiffusersZImageFeedForward: convert_z_image_ff},
         linear_filter=lambda path, _linear: path.startswith("feed_forward."),
@@ -196,7 +196,7 @@ def test_patch_module_tree_applies_module_converters_before_descending():
     assert isinstance(module.feed_forward.net[2], SVDQW4A4Linear)
 
 
-def test_patch_module_tree_skips_attention_subclasses():
+def test_patch_modules_recursively_raises_for_unhandled_attention_subclasses():
     class CustomAttention(Attention):
         pass
 
@@ -206,9 +206,29 @@ def test_patch_module_tree_skips_attention_subclasses():
             self.attention = CustomAttention(query_dim=8, heads=2, dim_head=4, bias=False)
 
     module = Wrapper()
-    report = patch_module_tree(module, attention_processor_factory=lambda _path, _attention: object())
 
-    assert report.attention_modules == 0
-    assert report.linear_modules == 0
-    assert report.skipped_modules == 1
+    with pytest.raises(TypeError, match="unsupported Diffusers Attention subclass without a converter"):
+        patch_modules_recursively(module, attention_processor_factory=lambda _path, _attention: object())
     assert isinstance(module.attention, CustomAttention)
+
+
+def test_patch_modules_recursively_replaces_attention_subclasses_with_converter():
+    class CustomAttention(Attention):
+        pass
+
+    class NunchakuCustomAttention(nn.Module):
+        pass
+
+    class Wrapper(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.attention = CustomAttention(query_dim=8, heads=2, dim_head=4, bias=False)
+
+    module = Wrapper()
+    report = patch_modules_recursively(
+        module,
+        custom_attention_converters={CustomAttention: lambda _attention: NunchakuCustomAttention()},
+    )
+
+    assert report.custom_attention_modules == 1
+    assert isinstance(module.attention, NunchakuCustomAttention)

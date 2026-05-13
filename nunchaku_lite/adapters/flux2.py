@@ -112,7 +112,7 @@ def _flux2_kv_causal_attention(
     return torch.cat([attn_txt, attn_ref, attn_img], dim=1)
 
 
-class LiteFlux2Attention(nn.Module):
+class NunchakuFlux2Attention(nn.Module):
     """Lite replacement for Flux2 cross-stream attention with SVDQ projections."""
 
     def __init__(self, other: Flux2Attention, context: SVDQPatchContext | None = None, **kwargs):
@@ -370,7 +370,7 @@ class LiteFlux2Attention(nn.Module):
         return query, key, value, encoder_seq_len
 
 
-class LiteFlux2FeedForward(nn.Module):
+class NunchakuFlux2FeedForward(nn.Module):
     """Quantized Flux2 feed-forward block."""
 
     def __init__(self, other: Flux2FeedForward, context: SVDQPatchContext | None = None, **kwargs):
@@ -406,7 +406,7 @@ class LiteFlux2FeedForward(nn.Module):
         return self.linear_out(x)
 
 
-class LiteFlux2ParallelSelfAttention(nn.Module):
+class NunchakuFlux2ParallelSelfAttention(nn.Module):
     """Lite replacement for Flux2 parallel self-attention plus MLP blocks."""
 
     def __init__(self, other: Flux2ParallelSelfAttention, context: SVDQPatchContext | None = None, **kwargs):
@@ -565,7 +565,7 @@ class LiteFlux2ParallelSelfAttention(nn.Module):
         return self.out_proj(attn_output) + self.mlp_fc2(mlp_hidden_states)
 
 
-class LiteFlux2TransformerBlock(nn.Module):
+class NunchakuFlux2TransformerBlock(nn.Module):
     """Lite replacement for Flux2 double-stream transformer blocks."""
 
     def __init__(self, block: Flux2TransformerBlock, context: SVDQPatchContext | None = None, **kwargs):
@@ -584,11 +584,11 @@ class LiteFlux2TransformerBlock(nn.Module):
         self.mlp_hidden_dim = block.mlp_hidden_dim
         self.norm1 = block.norm1
         self.norm1_context = block.norm1_context
-        self.attn = LiteFlux2Attention(block.attn, context=context, **kwargs)
+        self.attn = NunchakuFlux2Attention(block.attn, context=context, **kwargs)
         self.norm2 = block.norm2
-        self.ff = LiteFlux2FeedForward(block.ff, context=context, **kwargs)
+        self.ff = NunchakuFlux2FeedForward(block.ff, context=context, **kwargs)
         self.norm2_context = block.norm2_context
-        self.ff_context = LiteFlux2FeedForward(block.ff_context, context=context, **kwargs)
+        self.ff_context = NunchakuFlux2FeedForward(block.ff_context, context=context, **kwargs)
 
     def forward(
         self,
@@ -647,7 +647,7 @@ class LiteFlux2TransformerBlock(nn.Module):
         return encoder_hidden_states, hidden_states
 
 
-class LiteFlux2SingleTransformerBlock(nn.Module):
+class NunchakuFlux2SingleTransformerBlock(nn.Module):
     """Lite replacement for Flux2 single-stream transformer blocks."""
 
     def __init__(self, block: Flux2SingleTransformerBlock, context: SVDQPatchContext | None = None, **kwargs):
@@ -664,7 +664,7 @@ class LiteFlux2SingleTransformerBlock(nn.Module):
 
         super().__init__()
         self.norm = block.norm
-        self.attn = LiteFlux2ParallelSelfAttention(block.attn, context=context, **kwargs)
+        self.attn = NunchakuFlux2ParallelSelfAttention(block.attn, context=context, **kwargs)
 
     def forward(
         self,
@@ -891,9 +891,9 @@ class Flux2Adapter:
         context = build_svdq_context(transformer, quantization_config, options)
         prepare_transformer_dtype(transformer, context)
         for index, block in enumerate(transformer.transformer_blocks):
-            transformer.transformer_blocks[index] = LiteFlux2TransformerBlock(block, context=context)
+            transformer.transformer_blocks[index] = NunchakuFlux2TransformerBlock(block, context=context)
         for index, block in enumerate(transformer.single_transformer_blocks):
-            transformer.single_transformer_blocks[index] = LiteFlux2SingleTransformerBlock(block, context=context)
+            transformer.single_transformer_blocks[index] = NunchakuFlux2SingleTransformerBlock(block, context=context)
 
         transformer._nunchaku_lite_flux2_original_forward = transformer.forward
         transformer.forward = types.MethodType(lite_flux2_forward, transformer)

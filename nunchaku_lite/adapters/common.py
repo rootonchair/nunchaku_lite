@@ -53,6 +53,8 @@ class ModulePatchReport:
             :class:`SVDQW4A4Linear`.
         converted_modules: Number of adapter-specific child modules normalized
             by a caller-provided converter before recursive patching.
+        custom_attention_modules: Number of model-specific attention children
+            replaced by a caller-provided custom attention converter.
         skipped_modules: Number of children intentionally skipped because they
             were already patched, were outside the configured patch scope, or
             belonged to a module type that the generic traversal must not
@@ -62,6 +64,7 @@ class ModulePatchReport:
     attention_modules: int = 0
     linear_modules: int = 0
     converted_modules: int = 0
+    custom_attention_modules: int = 0
     skipped_modules: int = 0
 
     def add(self, other: "ModulePatchReport") -> None:
@@ -77,6 +80,7 @@ class ModulePatchReport:
         self.attention_modules += other.attention_modules
         self.linear_modules += other.linear_modules
         self.converted_modules += other.converted_modules
+        self.custom_attention_modules += other.custom_attention_modules
         self.skipped_modules += other.skipped_modules
 
 
@@ -337,7 +341,7 @@ def patch_attention_module(
     )
 
 
-def patch_module_tree(
+def patch_modules_recursively(
     module: nn.Module,
     context: SVDQPatchContext | None = None,
     *,
@@ -346,6 +350,7 @@ def patch_module_tree(
     linear_filter: Callable[[str, nn.Linear], bool] | None = None,
     skip_subtree: Callable[[str, nn.Module], bool] | None = None,
     module_converters: dict[type[nn.Module], Callable[[nn.Module], nn.Module]] | None = None,
+    custom_attention_converters: dict[type[nn.Module], Callable[[nn.Module], nn.Module]] | None = None,
     attention_kwargs: dict | None = None,
     linear_kwargs: dict | None = None,
 ) -> ModulePatchReport:
@@ -388,6 +393,11 @@ def patch_module_tree(
             continues. Converters are intended for adapter-specific layout
             normalization, such as turning a model-specific feed-forward block
             into a generic Diffusers ``FeedForward``.
+        custom_attention_converters: Optional dictionary keyed by exact module
+            class. When a child has a matching ``child.__class__`` entry, the
+            converter is called and the result replaces the child. This is for
+            Diffusers :class:`Attention` subclasses that cannot use the generic
+            exact-class patch path.
         attention_kwargs: Additional keyword arguments forwarded to
             :func:`patch_attention_module`.
         linear_kwargs: Additional keyword arguments forwarded to
@@ -400,6 +410,7 @@ def patch_module_tree(
 
     report = ModulePatchReport()
     module_converters = module_converters or {}
+    custom_attention_converters = custom_attention_converters or {}
     attention_kwargs = attention_kwargs or {}
     linear_kwargs = linear_kwargs or {}
 
@@ -420,6 +431,12 @@ def patch_module_tree(
             setattr(module, name, child)
             report.converted_modules += 1
 
+        custom_attention_converter = custom_attention_converters.get(child.__class__)
+        if custom_attention_converter is not None:
+            setattr(module, name, custom_attention_converter(child))
+            report.custom_attention_modules += 1
+            continue
+
         if child.__class__ is Attention:
             if attention_processor_factory is None:
                 report.skipped_modules += 1
@@ -438,8 +455,10 @@ def patch_module_tree(
             continue
 
         if isinstance(child, Attention):
-            report.skipped_modules += 1
-            continue
+            raise TypeError(
+                "patch_modules_recursively encountered an unsupported Diffusers Attention subclass without a converter: "
+                f"{child.__class__.__module__}.{child.__class__.__name__} at {child_path}"
+            )
 
         if isinstance(child, nn.Linear):
             if linear_filter is not None and not linear_filter(child_path, child):
@@ -450,7 +469,7 @@ def patch_module_tree(
             continue
 
         report.add(
-            patch_module_tree(
+            patch_modules_recursively(
                 child,
                 context,
                 path=child_path,
@@ -458,6 +477,7 @@ def patch_module_tree(
                 linear_filter=linear_filter,
                 skip_subtree=skip_subtree,
                 module_converters=module_converters,
+                custom_attention_converters=custom_attention_converters,
                 attention_kwargs=attention_kwargs,
                 linear_kwargs=linear_kwargs,
             )

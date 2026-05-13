@@ -6,7 +6,7 @@ from safetensors.torch import save_file
 
 from diffusers import Flux2Transformer2DModel
 from nunchaku_lite import patch_transformer
-from nunchaku_lite.adapters.flux2 import Flux2Adapter, LiteFlux2Attention, _pack_flux2_rotary_emb
+from nunchaku_lite.adapters.flux2 import Flux2Adapter, NunchakuFlux2Attention, _pack_flux2_rotary_emb
 
 
 def make_tiny_flux2_transformer():
@@ -63,9 +63,9 @@ def test_patch_transformer_patches_flux2_from_synthetic_checkpoint(tmp_path):
     assert returned is transformer
     assert transformer._nunchaku_lite_patched
     assert transformer._nunchaku_lite_target == "flux2"
-    assert transformer.transformer_blocks[0].__class__.__name__ == "LiteFlux2TransformerBlock"
-    assert transformer.single_transformer_blocks[0].__class__.__name__ == "LiteFlux2SingleTransformerBlock"
-    assert isinstance(transformer.transformer_blocks[0].attn, LiteFlux2Attention)
+    assert transformer.transformer_blocks[0].__class__.__name__ == "NunchakuFlux2TransformerBlock"
+    assert transformer.single_transformer_blocks[0].__class__.__name__ == "NunchakuFlux2SingleTransformerBlock"
+    assert isinstance(transformer.transformer_blocks[0].attn, NunchakuFlux2Attention)
     assert hasattr(transformer, "_nunchaku_lite_flux2_original_forward")
 
 

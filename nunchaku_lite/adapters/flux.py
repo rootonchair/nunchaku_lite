@@ -26,6 +26,7 @@ from .common import (
     fuse_linears,
     pack_rotemb,
     pad_tensor,
+    patch_modules_recursively,
     patch_svdq_linears,
     prepare_transformer_dtype,
     svdq_from_linear,
@@ -58,7 +59,7 @@ def rope(pos: torch.Tensor, dim: int, theta: int) -> torch.Tensor:
     return out.view(batch_size, seq_len, dim // 2, 1, 2).float()
 
 
-class LiteFluxPosEmbed(nn.Module):
+class NunchakuFluxPosEmbed(nn.Module):
     """Flux positional embedder that returns RoPE tensors in the native packable layout."""
 
     def __init__(self, dim: int, theta: int, axes_dim: tuple[int, ...] | list[int]):
@@ -132,7 +133,7 @@ def prepare_flux_rotary(
     return rotary_txt, rotary_img, rotary_single
 
 
-class LiteAdaLayerNormZero(nn.Module):
+class NunchakuAdaLayerNormZero(nn.Module):
     """Flux AdaLayerNormZero variant whose projection uses AWQ W4A16 weights."""
 
     def __init__(self, other: AdaLayerNormZero, scale_shift: float = 1.0, torch_dtype: torch.dtype = torch.bfloat16):
@@ -189,7 +190,7 @@ class LiteAdaLayerNormZero(nn.Module):
         return norm_x, gate_msa, shift_mlp, scale_mlp, gate_mlp
 
 
-class LiteAdaLayerNormZeroSingle(nn.Module):
+class NunchakuAdaLayerNormZeroSingle(nn.Module):
     """Single-stream Flux AdaLayerNormZero variant using AWQ for modulation."""
 
     def __init__(
@@ -233,7 +234,7 @@ class LiteAdaLayerNormZeroSingle(nn.Module):
         return norm_x, gate_msa
 
 
-class LiteFluxAttnProcessor(nn.Module):
+class NunchakuFluxAttnProcessor(nn.Module):
     """Attention processor for lite Flux attention modules, including optional IP-Adapter state."""
 
     _attention_backend = None
@@ -413,7 +414,7 @@ class LiteFluxAttnProcessor(nn.Module):
         return query, key, value
 
 
-class LiteFluxAttention(nn.Module):
+class NunchakuFluxAttention(nn.Module):
     """Lite replacement for Diffusers Flux attention with SVDQ QKV projections."""
 
     def __init__(
@@ -526,19 +527,19 @@ class LiteFluxAttention(nn.Module):
         if isinstance(processor, str):
             if processor not in ("flashattn2", "sdpa"):
                 raise ValueError(f"Processor {processor} is not supported")
-            self.processor = LiteFluxAttnProcessor()
+            self.processor = NunchakuFluxAttnProcessor()
             return
 
         name = processor.__class__.__name__
-        if name in ("FluxAttnProcessor", "LiteFluxAttnProcessor"):
-            self.processor = LiteFluxAttnProcessor()
+        if name in ("FluxAttnProcessor", "NunchakuFluxAttnProcessor"):
+            self.processor = NunchakuFluxAttnProcessor()
         elif name == "FluxIPAdapterAttnProcessor":
-            self.processor = LiteFluxAttnProcessor(processor)
+            self.processor = NunchakuFluxAttnProcessor(processor)
         else:
             raise ValueError(f"Processor {name} is not supported")
 
 
-class LiteFluxFeedForward(nn.Module):
+class NunchakuFluxFeedForward(nn.Module):
     """Quantized Flux feed-forward wrapper with a fused GELU MLP fast path."""
 
     def __init__(self, ff: nn.Module, context: SVDQPatchContext | None = None, **kwargs):
@@ -581,7 +582,7 @@ class LiteFluxFeedForward(nn.Module):
         return hidden_states
 
 
-class LiteFluxTransformerBlock(nn.Module):
+class NunchakuFluxTransformerBlock(nn.Module):
     """Lite replacement for Flux double-stream transformer blocks."""
 
     def __init__(
@@ -605,15 +606,15 @@ class LiteFluxTransformerBlock(nn.Module):
 
         super().__init__()
         torch_dtype = context.torch_dtype if context is not None else kwargs.get("torch_dtype", torch.bfloat16)
-        self.norm1 = LiteAdaLayerNormZero(block.norm1, scale_shift=scale_shift, torch_dtype=torch_dtype)
-        self.norm1_context = LiteAdaLayerNormZero(
+        self.norm1 = NunchakuAdaLayerNormZero(block.norm1, scale_shift=scale_shift, torch_dtype=torch_dtype)
+        self.norm1_context = NunchakuAdaLayerNormZero(
             block.norm1_context, scale_shift=scale_shift, torch_dtype=torch_dtype
         )
-        self.attn = LiteFluxAttention(block.attn, context=context, **kwargs)
+        self.attn = NunchakuFluxAttention(block.attn, context=context, **kwargs)
         self.norm2 = block.norm2
         self.norm2_context = block.norm2_context
-        self.ff = LiteFluxFeedForward(block.ff, context=context, **kwargs)
-        self.ff_context = LiteFluxFeedForward(block.ff_context, context=context, **kwargs)
+        self.ff = NunchakuFluxFeedForward(block.ff, context=context, **kwargs)
+        self.ff_context = NunchakuFluxFeedForward(block.ff_context, context=context, **kwargs)
 
     def forward(
         self,
@@ -675,7 +676,7 @@ class LiteFluxTransformerBlock(nn.Module):
         return encoder_hidden_states, hidden_states
 
 
-class LiteFluxSingleTransformerBlock(nn.Module):
+class NunchakuFluxSingleTransformerBlock(nn.Module):
     """Lite replacement for Flux single-stream transformer blocks."""
 
     def __init__(
@@ -700,12 +701,12 @@ class LiteFluxSingleTransformerBlock(nn.Module):
         super().__init__()
         torch_dtype = context.torch_dtype if context is not None else kwargs.get("torch_dtype", torch.bfloat16)
         self.mlp_hidden_dim = block.mlp_hidden_dim
-        self.norm = LiteAdaLayerNormZeroSingle(block.norm, scale_shift=scale_shift, torch_dtype=torch_dtype)
+        self.norm = NunchakuAdaLayerNormZeroSingle(block.norm, scale_shift=scale_shift, torch_dtype=torch_dtype)
         self.mlp_fc1 = svdq_from_linear(block.proj_mlp, context, **kwargs)
         self.act_mlp = block.act_mlp
         self.mlp_fc2 = svdq_from_linear(block.proj_out, context, in_features=self.mlp_hidden_dim, **kwargs)
         self.mlp_fc2.act_unsigned = self.mlp_fc2.precision != "nvfp4"
-        self.attn = LiteFluxAttention(block.attn, context=context, **kwargs)
+        self.attn = NunchakuFluxAttention(block.attn, context=context, **kwargs)
         self.attn.to_out = svdq_from_linear(block.proj_out, context, in_features=self.mlp_fc1.in_features, **kwargs)
 
     def forward(
@@ -797,18 +798,39 @@ class FluxAdapter:
         context = build_svdq_context(transformer, quantization_config, options)
         prepare_transformer_dtype(transformer, context)
         axes_dim = tuple(getattr(transformer.pos_embed, "axes_dim", transformer.config.axes_dims_rope))
-        transformer.pos_embed = LiteFluxPosEmbed(dim=transformer.inner_dim, theta=10000, axes_dim=axes_dim)
-        for index, block in enumerate(transformer.transformer_blocks):
-            transformer.transformer_blocks[index] = LiteFluxTransformerBlock(block, scale_shift=0.0, context=context)
-        for index, block in enumerate(transformer.single_transformer_blocks):
-            transformer.single_transformer_blocks[index] = LiteFluxSingleTransformerBlock(
-                block, scale_shift=0.0, context=context
-            )
+        transformer.pos_embed = NunchakuFluxPosEmbed(dim=transformer.inner_dim, theta=10000, axes_dim=axes_dim)
+        self._patch_transformer(transformer, context)
 
         checkpoint_state = convert_flux_state_dict(checkpoint_state)
         finalize_svdq_checkpoint(transformer, checkpoint_state, context)
         transformer._nunchaku_lite_flux_patched = True
         return checkpoint_state
+
+    def _patch_transformer(self, transformer: torch.nn.Module, context: SVDQPatchContext) -> None:
+        """Patch Flux block modules through one recursive transformer traversal.
+
+        Args:
+            transformer: Flux transformer whose module tree should be patched.
+            context: Shared SVDQ patch settings used by lite block
+                replacements.
+
+        Returns:
+            None.
+        """
+
+        patch_modules_recursively(
+            transformer,
+            context,
+            linear_filter=lambda _path, _linear: False,
+            module_converters={
+                FluxTransformerBlock: lambda block: NunchakuFluxTransformerBlock(
+                    block, scale_shift=0.0, context=context
+                ),
+                FluxSingleTransformerBlock: lambda block: NunchakuFluxSingleTransformerBlock(
+                    block, scale_shift=0.0, context=context
+                ),
+            },
+        )
 
 
 def convert_flux_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
