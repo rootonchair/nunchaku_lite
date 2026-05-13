@@ -39,7 +39,11 @@ The full `nunchaku` package in this repository exposes a broader set of model-sp
 - [ ] Sana transformer adapter based on `NunchakuSanaTransformer2DModel`, covering Sana 1.6B and Sana PAG examples.
 - [x] SDXL UNet adapter based on `NunchakuSDXLUNet2DConditionModel`, covering SDXL and SDXL-Turbo examples.
 - [ ] Quantized T5 text encoder support based on `NunchakuT5EncoderModel`.
-- [ ] FLUX LoRA conversion, loading, and composition support.
+- [ ] FLUX runtime LoRA support, including Diffusers-format conversion, Nunchaku-format loading, strength control, reset, and multi-LoRA composition.
+- [ ] Qwen-Image runtime LoRA support, covering Qwen-Image and Qwen-Image-Edit families after LoRA key mapping is defined.
+- [ ] Flux2 runtime LoRA support, reusing FLUX conversion patterns where compatible.
+- [ ] SDXL runtime LoRA support for quantized UNet attention and MLP projections.
+- [ ] Z-Image runtime LoRA support for quantized transformer projections.
 - [ ] FLUX IP-Adapter integration.
 - [ ] FLUX PuLID pipeline or patching support.
 - [ ] FLUX ControlNet workflow coverage for Canny, Depth, Fill, and ControlNet-Union variants.
