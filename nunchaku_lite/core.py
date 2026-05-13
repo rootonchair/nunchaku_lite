@@ -141,5 +141,6 @@ def _ensure_builtin_adapters() -> None:
     if _BUILTINS_LOADED:
         return
     importlib.import_module("nunchaku_lite.adapters.flux")
+    importlib.import_module("nunchaku_lite.adapters.flux2")
     importlib.import_module("nunchaku_lite.adapters.z_image")
     _BUILTINS_LOADED = True

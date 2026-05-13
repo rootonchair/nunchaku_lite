@@ -2,7 +2,7 @@
 
 `nunchaku_lite` is a small, plugin-oriented runtime package for applying Nunchaku v2 quantized transformer weights to existing Diffusers pipelines. It is designed to patch a pipeline's transformer module in place, so downstream code can keep using standard Diffusers pipeline classes without subclassing or importing the full `nunchaku` package.
 
-The first built-in adapters target Flux (`FluxTransformer2DModel`) and Z-Image (`ZImageTransformer2DModel`) with SVDQ W4A4 checkpoints published by `nunchaku-ai`.
+The first built-in adapters target Flux, Flux2, and Z-Image transformer classes with SVDQ W4A4 checkpoints.
 
 ## Design Goals
 
@@ -19,6 +19,7 @@ This package is an early lite runtime. The current built-in adapter set is:
 | Adapter | Target | Status |
 | --- | --- | --- |
 | `flux` | Diffusers `FluxTransformer2DModel` | Implemented |
+| `flux2` | Diffusers `Flux2Transformer2DModel` | Implemented |
 | `z_image` | Diffusers `ZImageTransformer2DModel` | Implemented |
 
 Additional model families should be added through the common adapter registry rather than through pipeline-specific subclasses.
@@ -123,6 +124,41 @@ image = pipe(
 image.save("flux_schnell_nunchaku_lite.png")
 ```
 
+## Quick Start: FLUX.2 Klein FP4
+
+```python
+import torch
+from diffusers import Flux2KleinPipeline
+from nunchaku_lite import patch_transformer
+
+model_id = "tonera/FLUX.2-klein-9B-Nunchaku"
+checkpoint = "tonera/FLUX.2-klein-9B-Nunchaku/svdq-fp4_r32-FLUX.2-klein-9B-Nunchaku.safetensors"
+
+pipe = Flux2KleinPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
+
+patch_transformer(
+    pipe.transformer,
+    checkpoint,
+    target="flux2",
+    precision="fp4",
+    torch_dtype=torch.bfloat16,
+    device="cuda",
+)
+
+pipe = pipe.to("cuda")
+
+image = pipe(
+    prompt="A cat holding a sign that says hello world",
+    height=1024,
+    width=1024,
+    num_inference_steps=4,
+    guidance_scale=1.0,
+    generator=torch.Generator(device="cuda").manual_seed(12345),
+).images[0]
+
+image.save("flux2_klein_nunchaku_lite.png")
+```
+
 Checkpoint paths can be local `.safetensors` files or Hugging Face paths of the form:
 
 ```text
@@ -216,6 +252,18 @@ Flux benchmark:
 python benchmarks/benchmark_flux.py \
   --model-id black-forest-labs/FLUX.1-schnell \
   --checkpoint nunchaku-ai/nunchaku-flux.1-schnell/svdq-fp4_r32-flux.1-schnell.safetensors \
+  --precision fp4 \
+  --dtype bf16 \
+  --runs 3 \
+  --warmup-runs 1
+```
+
+Flux2 benchmark:
+
+```bash
+python benchmarks/benchmark_flux2.py \
+  --model-id tonera/FLUX.2-klein-9B-Nunchaku \
+  --checkpoint tonera/FLUX.2-klein-9B-Nunchaku/svdq-fp4_r32-FLUX.2-klein-9B-Nunchaku.safetensors \
   --precision fp4 \
   --dtype bf16 \
   --runs 3 \

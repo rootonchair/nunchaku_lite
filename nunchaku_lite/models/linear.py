@@ -75,12 +75,13 @@ class SVDQW4A4Linear(nn.Module):
     def from_linear(cls, linear: nn.Linear, **kwargs):
         in_features = kwargs.pop("in_features", linear.in_features)
         torch_dtype = kwargs.pop("torch_dtype", linear.weight.dtype)
+        device = kwargs.pop("device", linear.weight.device)
         return cls(
             in_features=in_features,
             out_features=linear.out_features,
             bias=linear.bias is not None,
             torch_dtype=torch_dtype,
-            device=linear.weight.device,
+            device=device,
             **kwargs,
         )
 

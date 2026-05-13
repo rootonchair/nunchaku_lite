@@ -110,4 +110,13 @@ inline torch::Tensor gemv_awq(torch::Tensor in_feats,
     return to_torch(result);
 }
 
+inline void attention_fp16(torch::Tensor q,
+                           torch::Tensor k,
+                           torch::Tensor v,
+                           torch::Tensor o,
+                           double scale) {
+    TorchOpContext ctx;
+    nunchaku::kernels::attention_fp16(from_torch(q), from_torch(k), from_torch(v), from_torch(o), scale);
+}
+
 } // namespace nunchaku_lite::ops
