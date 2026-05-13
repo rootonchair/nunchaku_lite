@@ -1,6 +1,7 @@
 #pragma once
 
 #include "interop/torch.h"
+#include "kernels/awq/gemv_awq.h"
 #include "kernels/zgemm/zgemm.h"
 
 namespace nunchaku_lite::ops {
@@ -87,6 +88,26 @@ inline void quantize_w4a4_act_fuse_lora(std::optional<torch::Tensor> input,
                                                    as_tensor(smooth),
                                                    fuse_glu,
                                                    fp4);
+}
+
+inline torch::Tensor gemv_awq(torch::Tensor in_feats,
+                              torch::Tensor kernel,
+                              torch::Tensor scaling_factors,
+                              torch::Tensor zeros,
+                              int64_t m,
+                              int64_t n,
+                              int64_t k,
+                              int64_t group_size) {
+    TorchOpContext ctx;
+    Tensor result = ::gemv_awq(from_torch(in_feats.contiguous()),
+                               from_torch(kernel.contiguous()),
+                               from_torch(scaling_factors.contiguous()),
+                               from_torch(zeros.contiguous()),
+                               static_cast<int>(m),
+                               static_cast<int>(n),
+                               static_cast<int>(k),
+                               static_cast<int>(group_size));
+    return to_torch(result);
 }
 
 } // namespace nunchaku_lite::ops

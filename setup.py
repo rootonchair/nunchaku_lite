@@ -87,6 +87,9 @@ if __name__ == "__main__":
     def native_source(path: str) -> str:
         return os.path.join("native", path)
 
+    with open(os.path.join(root_dir, "README.md"), encoding="utf-8") as readme_file:
+        long_description = readme_file.read()
+
     include_dirs = [
         here("nunchaku_lite/csrc"),
         native("src"),
@@ -140,6 +143,7 @@ if __name__ == "__main__":
             native_source("src/kernels/zgemm/gemm_w4a4_launch_bf16_fp4.cu"),
             native_source("src/kernels/zgemm/gemm_w8a8.cu"),
             native_source("src/kernels/zgemm/attention.cu"),
+            native_source("src/kernels/awq/gemv_awq.cu"),
         ],
         extra_compile_args={
             "gcc": gcc_flags,
@@ -153,6 +157,10 @@ if __name__ == "__main__":
     setuptools.setup(
         name="nunchaku_lite",
         version=version,
+        description="Lite plugin runtime for applying Nunchaku v2 quantized transformer weights to Diffusers pipelines.",
+        long_description=long_description,
+        long_description_content_type="text/markdown",
+        python_requires=">=3.10",
         packages=setuptools.find_packages(include=["nunchaku_lite", "nunchaku_lite.*"]),
         install_requires=["torch>=2.7", "diffusers>=0.36", "safetensors", "huggingface-hub>=0.34"],
         ext_modules=[extension],

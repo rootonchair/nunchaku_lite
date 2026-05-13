@@ -9,11 +9,12 @@ def test_import_does_not_import_full_nunchaku():
     import nunchaku_lite
 
     assert "nunchaku" not in sys.modules
+    assert "flux" in nunchaku_lite.list_adapters()
     assert "z_image" in nunchaku_lite.list_adapters()
 
 
 def test_unsupported_transformer_error_lists_adapters():
     from nunchaku_lite import patch_transformer
 
-    with pytest.raises(ValueError, match="Available adapters: z_image"):
+    with pytest.raises(ValueError, match="Available adapters: flux, z_image"):
         patch_transformer(torch.nn.Linear(1, 1), "missing/repo/checkpoint.safetensors")

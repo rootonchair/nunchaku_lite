@@ -9,6 +9,8 @@ requires = [
 
 [project]
 name = "nunchaku_lite"
+description = "Lite plugin runtime for applying Nunchaku v2 quantized transformer weights to Diffusers pipelines."
+readme = "README.md"
 requires-python = ">=3.10"
 dynamic = [ "version" ]
 dependencies = [

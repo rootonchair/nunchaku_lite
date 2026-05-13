@@ -7,3 +7,4 @@ recursive-include native/third_party/mio/include *.cpp *.h *.hpp *.ipp
 recursive-include native/third_party/spdlog/include *.cpp *.h *.hpp *.ipp
 
 include setup.py
+include README.md
