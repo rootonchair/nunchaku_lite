@@ -2,10 +2,11 @@
 
 import math
 from dataclasses import dataclass
-from typing import Type
+from typing import Callable, Type
 
 import torch
 import torch.nn as nn
+from diffusers.models.attention_processor import Attention
 
 from ..models.linear import SVDQW4A4Linear
 from ..utils import convert_fp16, patch_scale_key
@@ -39,6 +40,44 @@ class SVDQPatchContext:
         """
 
         return {"precision": self.precision, "rank": self.rank, "torch_dtype": self.torch_dtype}
+
+
+@dataclass
+class ModulePatchReport:
+    """Counts of module replacements performed by a recursive patch pass.
+
+    Attributes:
+        attention_modules: Number of generic Diffusers attention children
+            replaced with :class:`NunchakuAttention`.
+        linear_modules: Number of dense ``nn.Linear`` children replaced with
+            :class:`SVDQW4A4Linear`.
+        converted_modules: Number of adapter-specific child modules normalized
+            by a caller-provided converter before recursive patching.
+        skipped_modules: Number of children intentionally skipped because they
+            were already patched, were outside the configured patch scope, or
+            belonged to a module type that the generic traversal must not
+            rewrite.
+    """
+
+    attention_modules: int = 0
+    linear_modules: int = 0
+    converted_modules: int = 0
+    skipped_modules: int = 0
+
+    def add(self, other: "ModulePatchReport") -> None:
+        """Merge counts from another report into this report.
+
+        Args:
+            other: Report produced by a nested recursive traversal.
+
+        Returns:
+            None. The current report is updated in place.
+        """
+
+        self.attention_modules += other.attention_modules
+        self.linear_modules += other.linear_modules
+        self.converted_modules += other.converted_modules
+        self.skipped_modules += other.skipped_modules
 
 
 def build_svdq_context(transformer: nn.Module, quantization_config: dict, options) -> SVDQPatchContext:
@@ -138,6 +177,327 @@ def svdq_from_linear(
     return SVDQW4A4Linear.from_linear(linear, **_linear_kwargs(context, kwargs))
 
 
+class NunchakuAttention(nn.Module):
+    """Generic Nunchaku Lite replacement for Diffusers attention modules.
+
+    The class is intended for generic Diffusers attention modules whose forward
+    contract can be preserved by swapping the processor and replacing dense
+    projections with a fused SVDQ QKV projection. Model-specific attention
+    classes with custom topology should still use rewritten lite classes.
+    """
+
+    def __init__(
+        self,
+        attention: nn.Module,
+        processor,
+        context: SVDQPatchContext | None = None,
+        *,
+        qkv_attr: str = "to_qkv",
+        patch_output: bool = True,
+        **kwargs,
+    ):
+        """Create a Nunchaku attention module from a generic Diffusers module.
+
+        Args:
+            attention: Source Diffusers attention module with ``to_q``,
+                ``to_k``, and ``to_v`` projections.
+            processor: Processor instance used by the new module.
+            context: Optional SVDQ settings applied to replacement projections.
+            qkv_attr: Attribute name that will hold the fused QKV projection.
+            patch_output: Whether to replace ``attention.to_out[0]`` with SVDQ.
+            **kwargs: Additional SVDQ constructor overrides.
+
+        Raises:
+            TypeError: If ``attention`` is not the exact Diffusers
+                :class:`Attention` class or does not expose the expected
+                generic Q/K/V projections.
+            ValueError: If the requested output projection cannot be patched.
+
+        Returns:
+            None.
+        """
+
+        super().__init__()
+        required = ("to_q", "to_k", "to_v")
+        if not all(hasattr(attention, name) for name in required):
+            raise TypeError("NunchakuAttention requires an attention module with to_q, to_k, and to_v projections")
+
+        self._copy_attention_attributes(attention)
+        with torch.device("meta"):
+            to_qkv = fuse_linears([attention.to_q, attention.to_k, attention.to_v])
+        setattr(self, qkv_attr, svdq_from_linear(to_qkv, context, **kwargs))
+
+        if hasattr(attention, "norm_q"):
+            self.norm_q = attention.norm_q
+        if hasattr(attention, "norm_k"):
+            self.norm_k = attention.norm_k
+
+        if patch_output:
+            if not hasattr(attention, "to_out") or len(attention.to_out) == 0:
+                raise ValueError("NunchakuAttention expected a non-empty to_out projection list")
+            self.to_out = attention.to_out
+            self.to_out[0] = svdq_from_linear(self.to_out[0], context, **kwargs)
+
+        self.processor = processor
+        self._nunchaku_lite_attention_patched = True
+
+    def _copy_attention_attributes(self, attention: nn.Module) -> None:
+        """Copy non-module metadata from a Diffusers attention module.
+
+        Args:
+            attention: Source attention module.
+
+        Returns:
+            None.
+        """
+
+        for name, value in attention.__dict__.items():
+            if name.startswith("_") or name in {"training"}:
+                continue
+            if isinstance(value, (nn.Module, nn.Parameter)):
+                continue
+            setattr(self, name, value)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        **cross_attention_kwargs,
+    ):
+        """Dispatch attention to the installed processor.
+
+        Args:
+            hidden_states: Main hidden states.
+            encoder_hidden_states: Optional encoder/context states.
+            attention_mask: Optional attention mask.
+            **cross_attention_kwargs: Extra kwargs consumed by the processor,
+                such as packed rotary embeddings.
+
+        Returns:
+            Output returned by the installed attention processor.
+        """
+
+        return self.processor(
+            attn=self,
+            hidden_states=hidden_states,
+            encoder_hidden_states=encoder_hidden_states,
+            attention_mask=attention_mask,
+            **cross_attention_kwargs,
+        )
+
+
+def patch_attention_module(
+    attention: nn.Module,
+    processor,
+    context: SVDQPatchContext | None = None,
+    *,
+    qkv_attr: str = "to_qkv",
+    patch_output: bool = True,
+    **kwargs,
+) -> nn.Module:
+    """Create a Nunchaku attention module for a generic Diffusers attention.
+
+    The helper intentionally only validates/selects the generic attention path
+    and initializes :class:`NunchakuAttention`. Model-specific attention classes
+    with custom topology should still use rewritten lite classes directly.
+
+    Args:
+        attention: Generic Diffusers attention module with ``to_q``, ``to_k``,
+            ``to_v``, and optionally ``to_out``.
+        processor: Processor instance used by the patched module.
+        context: Optional SVDQ settings applied to replacement projections.
+        qkv_attr: Attribute name that will hold the fused QKV projection.
+        patch_output: Whether to replace ``attention.to_out[0]`` with SVDQ.
+        **kwargs: Additional SVDQ constructor overrides.
+
+    Returns:
+        New :class:`NunchakuAttention` instance.
+
+    Raises:
+        TypeError: If the module is not the exact Diffusers
+            :class:`Attention` class.
+        ValueError: If the requested output projection cannot be patched.
+    """
+
+    if isinstance(attention, NunchakuAttention):
+        return attention
+    if attention.__class__ is not Attention:
+        raise TypeError(
+            "patch_attention_module only supports the exact diffusers Attention class; "
+            f"got {attention.__class__.__module__}.{attention.__class__.__name__}"
+        )
+    return NunchakuAttention(
+        attention,
+        processor,
+        context,
+        qkv_attr=qkv_attr,
+        patch_output=patch_output,
+        **kwargs,
+    )
+
+
+def patch_module_tree(
+    module: nn.Module,
+    context: SVDQPatchContext | None = None,
+    *,
+    path: str = "",
+    attention_processor_factory: Callable[[str, Attention], object] | None = None,
+    linear_filter: Callable[[str, nn.Linear], bool] | None = None,
+    skip_subtree: Callable[[str, nn.Module], bool] | None = None,
+    module_converters: dict[type[nn.Module], Callable[[nn.Module], nn.Module]] | None = None,
+    attention_kwargs: dict | None = None,
+    linear_kwargs: dict | None = None,
+) -> ModulePatchReport:
+    """Recursively patch generic attention and eligible linear children.
+
+    The traversal mutates ``module`` in place by walking its direct children,
+    then descending into unhandled child modules. Exact Diffusers
+    :class:`Attention` children are replaced through
+    :func:`patch_attention_module` when ``attention_processor_factory`` is
+    provided. Dense ``nn.Linear`` children are replaced with
+    :class:`SVDQW4A4Linear` when ``linear_filter`` allows the child. Adapter
+    code should call this helper on safe roots or provide filters because a
+    whole transformer often contains dense projections that are intentionally
+    not present in a quantized checkpoint. Adapter-specific child modules can
+    also be normalized first through ``module_converters`` so the rest of the
+    traversal only needs to handle generic attention and linear replacement.
+
+    Args:
+        module: Root module whose children should be inspected and mutated.
+            The root itself is not replaced; pass its parent when the root may
+            be an attention or linear module.
+        context: Optional SVDQ patch context used to configure replacement
+            linear modules.
+        path: Dot-separated path prefix for ``module``. Recursive calls append
+            child names to this value before invoking filters and factories.
+        attention_processor_factory: Optional callable receiving
+            ``(child_path, attention)`` and returning the processor to install
+            on a generic :class:`Attention` replacement. When omitted, generic
+            attention children are skipped rather than partially patched.
+        linear_filter: Optional callable receiving ``(child_path, linear)``.
+            Returning ``False`` skips that dense linear without descending into
+            it. When omitted, all dense linear children in the selected root are
+            patched.
+        skip_subtree: Optional callable receiving ``(child_path, child)``.
+            Returning ``True`` skips the child and all of its descendants.
+        module_converters: Optional dictionary keyed by exact module class.
+            When a child has a matching ``child.__class__`` entry, the
+            converter is called with the child and its return value replaces
+            the child before attention, linear, or recursive handling
+            continues. Converters are intended for adapter-specific layout
+            normalization, such as turning a model-specific feed-forward block
+            into a generic Diffusers ``FeedForward``.
+        attention_kwargs: Additional keyword arguments forwarded to
+            :func:`patch_attention_module`.
+        linear_kwargs: Additional keyword arguments forwarded to
+            :func:`svdq_from_linear`.
+
+    Returns:
+        :class:`ModulePatchReport` containing replacement and skip counts for
+        this traversal.
+    """
+
+    report = ModulePatchReport()
+    module_converters = module_converters or {}
+    attention_kwargs = attention_kwargs or {}
+    linear_kwargs = linear_kwargs or {}
+
+    for name, child in list(module.named_children()):
+        child_path = f"{path}.{name}" if path else name
+
+        if skip_subtree is not None and skip_subtree(child_path, child):
+            report.skipped_modules += 1
+            continue
+
+        if isinstance(child, (NunchakuAttention, SVDQW4A4Linear)):
+            report.skipped_modules += 1
+            continue
+
+        module_converter = module_converters.get(child.__class__)
+        if module_converter is not None:
+            child = module_converter(child)
+            setattr(module, name, child)
+            report.converted_modules += 1
+
+        if child.__class__ is Attention:
+            if attention_processor_factory is None:
+                report.skipped_modules += 1
+                continue
+            setattr(
+                module,
+                name,
+                patch_attention_module(
+                    child,
+                    attention_processor_factory(child_path, child),
+                    context=context,
+                    **attention_kwargs,
+                ),
+            )
+            report.attention_modules += 1
+            continue
+
+        if isinstance(child, Attention):
+            report.skipped_modules += 1
+            continue
+
+        if isinstance(child, nn.Linear):
+            if linear_filter is not None and not linear_filter(child_path, child):
+                report.skipped_modules += 1
+                continue
+            _replace_linear_child(module, name, lambda linear: svdq_from_linear(linear, context, **linear_kwargs))
+            report.linear_modules += 1
+            continue
+
+        report.add(
+            patch_module_tree(
+                child,
+                context,
+                path=child_path,
+                attention_processor_factory=attention_processor_factory,
+                linear_filter=linear_filter,
+                skip_subtree=skip_subtree,
+                module_converters=module_converters,
+                attention_kwargs=attention_kwargs,
+                linear_kwargs=linear_kwargs,
+            )
+        )
+
+    return report
+
+
+def _replace_linear_child(
+    module: nn.Module,
+    name: str,
+    replacement_factory: Callable[[nn.Linear], nn.Module],
+) -> None:
+    """Replace one named linear child with a factory-created module.
+
+    This small helper centralizes the ``get child, verify type, setattr``
+    mechanics shared by the mixed module-tree patcher and the linear-only
+    patcher. Callers remain responsible for deciding whether the child is in
+    scope and for providing the replacement factory appropriate to that path.
+
+    Args:
+        module: Parent module that owns the linear child.
+        name: Child attribute name in ``module``.
+        replacement_factory: Callable receiving the existing ``nn.Linear`` and
+            returning the replacement module to install.
+
+    Returns:
+        None. The parent module is mutated in place.
+
+    Raises:
+        TypeError: If the named child is not an ``nn.Linear``. This indicates a
+            caller bug because filtering should happen before replacement.
+    """
+
+    child = getattr(module, name)
+    if not isinstance(child, nn.Linear):
+        raise TypeError(f"Expected {name} to be an nn.Linear child, got {child.__class__.__name__}")
+    setattr(module, name, replacement_factory(child))
+
+
 def patch_svdq_linears(
     module: nn.Module,
     context: SVDQPatchContext | None = None,
@@ -201,9 +561,9 @@ def patch_linear(module: nn.Module, linear_cls: Type[nn.Module], **kwargs) -> nn
         The same ``module`` object after mutation.
     """
 
-    for name, child in module.named_children():
+    for name, child in list(module.named_children()):
         if isinstance(child, nn.Linear):
-            setattr(module, name, linear_cls.from_linear(child, **kwargs))
+            _replace_linear_child(module, name, lambda linear: linear_cls.from_linear(linear, **kwargs))
         else:
             patch_linear(child, linear_cls, **kwargs)
     return module
