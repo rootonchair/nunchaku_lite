@@ -30,6 +30,7 @@ from .common import (
     fuse_linears,
     pack_rotemb,
     pad_tensor,
+    patch_modules_recursively,
     prepare_transformer_dtype,
     svdq_from_linear,
 )
@@ -890,16 +891,37 @@ class Flux2Adapter:
 
         context = build_svdq_context(transformer, quantization_config, options)
         prepare_transformer_dtype(transformer, context)
-        for index, block in enumerate(transformer.transformer_blocks):
-            transformer.transformer_blocks[index] = NunchakuFlux2TransformerBlock(block, context=context)
-        for index, block in enumerate(transformer.single_transformer_blocks):
-            transformer.single_transformer_blocks[index] = NunchakuFlux2SingleTransformerBlock(block, context=context)
+        self._patch_transformer(transformer, context)
 
         transformer._nunchaku_lite_flux2_original_forward = transformer.forward
         transformer.forward = types.MethodType(lite_flux2_forward, transformer)
         finalize_svdq_checkpoint(transformer, checkpoint_state, context)
         transformer._nunchaku_lite_flux2_patched = True
         return checkpoint_state
+
+    def _patch_transformer(self, transformer: torch.nn.Module, context: SVDQPatchContext) -> None:
+        """Patch Flux2 block modules through one recursive transformer traversal.
+
+        Args:
+            transformer: Flux2 transformer whose module tree should be patched.
+            context: Shared SVDQ patch settings used by lite block
+                replacements.
+
+        Returns:
+            None.
+        """
+
+        patch_modules_recursively(
+            transformer,
+            context,
+            linear_filter=lambda _path, _linear: False,
+            module_converters={
+                Flux2TransformerBlock: lambda block: NunchakuFlux2TransformerBlock(block, context=context),
+                Flux2SingleTransformerBlock: lambda block: NunchakuFlux2SingleTransformerBlock(
+                    block, context=context
+                ),
+            },
+        )
 
 
 register_adapter(Flux2Adapter())

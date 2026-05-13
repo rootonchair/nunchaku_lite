@@ -93,9 +93,6 @@ if __name__ == "__main__":
     include_dirs = [
         here("nunchaku_lite/csrc"),
         native("src"),
-        native("third_party/cutlass/include"),
-        native("third_party/json/include"),
-        native("third_party/mio/include"),
         native("third_party/spdlog/include"),
     ]
 
@@ -135,13 +132,11 @@ if __name__ == "__main__":
             "nunchaku_lite/csrc/pybind.cpp",
             native_source("src/interop/torch.cpp"),
             native_source("src/kernels/zgemm/gemm_w4a4.cu"),
-            native_source("src/kernels/zgemm/gemm_w4a4_test.cu"),
             native_source("src/kernels/zgemm/gemm_w4a4_launch_fp16_int4.cu"),
             native_source("src/kernels/zgemm/gemm_w4a4_launch_fp16_int4_fasteri2f.cu"),
             native_source("src/kernels/zgemm/gemm_w4a4_launch_fp16_fp4.cu"),
             native_source("src/kernels/zgemm/gemm_w4a4_launch_bf16_int4.cu"),
             native_source("src/kernels/zgemm/gemm_w4a4_launch_bf16_fp4.cu"),
-            native_source("src/kernels/zgemm/gemm_w8a8.cu"),
             native_source("src/kernels/zgemm/attention.cu"),
             native_source("src/kernels/awq/gemv_awq.cu"),
         ],

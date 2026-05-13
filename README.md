@@ -2,7 +2,7 @@
 
 `nunchaku_lite` is a small, plugin-oriented runtime package for applying Nunchaku v2 quantized transformer weights to existing Diffusers pipelines. It is designed to patch a pipeline's transformer module in place, so downstream code can keep using standard Diffusers pipeline classes without subclassing or importing the full `nunchaku` package.
 
-The first built-in adapters target Flux, Flux2, and Z-Image transformer classes with SVDQ W4A4 checkpoints.
+The first built-in adapters target Flux, Flux2, Qwen-Image, and Z-Image transformer classes with SVDQ W4A4 checkpoints.
 
 ## Design Goals
 
@@ -20,9 +20,28 @@ This package is an early lite runtime. The current built-in adapter set is:
 | --- | --- | --- |
 | `flux` | Diffusers `FluxTransformer2DModel` | Implemented |
 | `flux2` | Diffusers `Flux2Transformer2DModel` | Implemented |
+| `qwen_image` | Diffusers `QwenImageTransformer2DModel` | Implemented |
 | `z_image` | Diffusers `ZImageTransformer2DModel` | Implemented |
 
 Additional model families should be added through the common adapter registry rather than through pipeline-specific subclasses.
+
+### Feature Backlog from Original `nunchaku`
+
+The full `nunchaku` package in this repository exposes a broader set of model-specific loaders and workflow integrations. Use this checklist as the current porting backlog for `nunchaku_lite`:
+
+- [x] FLUX.1 transformer adapter for Diffusers `FluxTransformer2DModel`.
+- [x] Flux2 transformer adapter for Diffusers `Flux2Transformer2DModel`.
+- [x] Qwen-Image transformer adapter based on `NunchakuQwenImageTransformer2DModel`, covering Qwen-Image, Qwen-Image-Lightning, Qwen-Image-Edit, Qwen-Image-Edit-2509, and Qwen-Image ControlNet examples.
+- [x] Z-Image transformer adapter for Diffusers `ZImageTransformer2DModel`.
+- [ ] Sana transformer adapter based on `NunchakuSanaTransformer2DModel`, covering Sana 1.6B and Sana PAG examples.
+- [ ] SDXL UNet adapter based on `NunchakuSDXLUNet2DConditionModel`, covering SDXL and SDXL-Turbo examples.
+- [ ] Quantized T5 text encoder support based on `NunchakuT5EncoderModel`.
+- [ ] FLUX LoRA conversion, loading, and composition support.
+- [ ] FLUX IP-Adapter integration.
+- [ ] FLUX PuLID pipeline or patching support.
+- [ ] FLUX ControlNet workflow coverage for Canny, Depth, Fill, and ControlNet-Union variants.
+- [ ] Caching integrations equivalent to TeaCache, first-block cache, double-block cache, and DiT cache examples.
+- [ ] Async/offload paths for lower-VRAM inference where supported by the original implementation.
 
 ## Requirements
 
@@ -55,109 +74,18 @@ By default, the build uses `NUNCHAKU_INSTALL_MODE=FAST` and compiles for visible
 NUNCHAKU_INSTALL_MODE=ALL pip install .
 ```
 
-## Quick Start: Z-Image Turbo FP4
+## Examples
 
-```python
-import torch
-from diffusers import ZImagePipeline
-from nunchaku_lite import patch_transformer
+Full quick-start scripts live under `examples/` so the main README stays focused on the runtime API and adapter model.
 
-model_id = "Tongyi-MAI/Z-Image-Turbo"
-checkpoint = "nunchaku-ai/nunchaku-z-image-turbo/svdq-fp4_r128-z-image-turbo.safetensors"
+| Model | Example | Notes |
+| --- | --- | --- |
+| Qwen-Image INT4 / FP4 | [examples/qwen_image.md](examples/qwen_image.md) | Qwen-Image plus Qwen-Image-Edit-2509 base, 4-step distilled, and 8-step distilled examples. |
+| Z-Image Turbo INT4 / FP4 | [examples/z_image.md](examples/z_image.md) | Standard `patch_transformer(pipe.transformer, ...)` flow. |
+| FLUX.1-schnell INT4 / FP4 | [examples/flux.md](examples/flux.md) | Standard Flux adapter flow. |
+| FLUX.2 Klein INT4 / FP4 | [examples/flux2.md](examples/flux2.md) | Standard Flux2 adapter flow. |
 
-pipe = ZImagePipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
-
-patch_transformer(
-    pipe.transformer,
-    checkpoint,
-    precision="fp4",
-    torch_dtype=torch.bfloat16,
-    device="cuda",
-)
-
-pipe = pipe.to("cuda")
-
-image = pipe(
-    prompt="a cinematic photo of a glass greenhouse full of tropical plants during golden hour",
-    height=1024,
-    width=1024,
-    num_inference_steps=8,
-    guidance_scale=0.0,
-    generator=torch.Generator(device="cuda").manual_seed(12345),
-).images[0]
-
-image.save("z_image_nunchaku_lite.png")
-```
-
-## Quick Start: FLUX.1-schnell FP4
-
-```python
-import torch
-from diffusers import FluxPipeline
-from nunchaku_lite import patch_transformer
-
-model_id = "black-forest-labs/FLUX.1-schnell"
-checkpoint = "nunchaku-ai/nunchaku-flux.1-schnell/svdq-fp4_r32-flux.1-schnell.safetensors"
-
-pipe = FluxPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
-
-patch_transformer(
-    pipe.transformer,
-    checkpoint,
-    target="flux",
-    precision="fp4",
-    torch_dtype=torch.bfloat16,
-    device="cuda",
-)
-
-pipe = pipe.to("cuda")
-
-image = pipe(
-    "A cat holding a sign that says hello world",
-    height=1024,
-    width=1024,
-    num_inference_steps=4,
-    guidance_scale=0.0,
-    generator=torch.Generator(device="cuda").manual_seed(12345),
-).images[0]
-
-image.save("flux_schnell_nunchaku_lite.png")
-```
-
-## Quick Start: FLUX.2 Klein FP4
-
-```python
-import torch
-from diffusers import Flux2KleinPipeline
-from nunchaku_lite import patch_transformer
-
-model_id = "tonera/FLUX.2-klein-9B-Nunchaku"
-checkpoint = "tonera/FLUX.2-klein-9B-Nunchaku/svdq-fp4_r32-FLUX.2-klein-9B-Nunchaku.safetensors"
-
-pipe = Flux2KleinPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
-
-patch_transformer(
-    pipe.transformer,
-    checkpoint,
-    target="flux2",
-    precision="fp4",
-    torch_dtype=torch.bfloat16,
-    device="cuda",
-)
-
-pipe = pipe.to("cuda")
-
-image = pipe(
-    prompt="A cat holding a sign that says hello world",
-    height=1024,
-    width=1024,
-    num_inference_steps=4,
-    guidance_scale=1.0,
-    generator=torch.Generator(device="cuda").manual_seed(12345),
-).images[0]
-
-image.save("flux2_klein_nunchaku_lite.png")
-```
+The Qwen low-VRAM examples use `enable_model_cpu_offload()`, which requires `accelerate`.
 
 Checkpoint paths can be local `.safetensors` files or Hugging Face paths of the form:
 
@@ -325,6 +253,18 @@ Flux2 benchmark:
 python benchmarks/benchmark_flux2.py \
   --model-id tonera/FLUX.2-klein-9B-Nunchaku \
   --checkpoint tonera/FLUX.2-klein-9B-Nunchaku/svdq-fp4_r32-FLUX.2-klein-9B-Nunchaku.safetensors \
+  --precision fp4 \
+  --dtype bf16 \
+  --runs 3 \
+  --warmup-runs 1
+```
+
+Qwen-Image benchmark:
+
+```bash
+python benchmarks/benchmark_qwen_image.py \
+  --model-id Qwen/Qwen-Image \
+  --checkpoint nunchaku-tech/nunchaku-qwen-image/svdq-fp4_r32-qwen-image.safetensors \
   --precision fp4 \
   --dtype bf16 \
   --runs 3 \
