@@ -8,8 +8,7 @@ Set `precision = "int4"` or `precision = "fp4"` in the script.
 
 Run from the repository root:
 
-```bash
-python - <<'PY'
+```python
 from pathlib import Path
 
 import torch
@@ -63,7 +62,6 @@ image = pipe(
 output_path.parent.mkdir(parents=True, exist_ok=True)
 image.save(output_path)
 print(f"saved {output_path}")
-PY
 ```
 
 ## Qwen-Image-Edit-2509 INT4 / FP4 Base
@@ -76,8 +74,7 @@ Set `precision = "int4"` or `precision = "fp4"` in the script.
 
 Run from the repository root:
 
-```bash
-python - <<'PY'
+```python
 from pathlib import Path
 
 import torch
@@ -132,7 +129,6 @@ image = pipe(
 output_path.parent.mkdir(parents=True, exist_ok=True)
 image.save(output_path)
 print(f"saved {output_path}")
-PY
 ```
 
 ## Qwen-Image-Edit-2509 INT4 / FP4 Lightning 4-Step
@@ -145,8 +141,7 @@ Set `precision = "int4"` or `precision = "fp4"` in the script.
 
 Run from the repository root:
 
-```bash
-python - <<'PY'
+```python
 import math
 from pathlib import Path
 
@@ -224,7 +219,6 @@ image = pipe(
 output_path.parent.mkdir(parents=True, exist_ok=True)
 image.save(output_path)
 print(f"saved {output_path}")
-PY
 ```
 
 ## Qwen-Image-Edit-2509 INT4 / FP4 Lightning 8-Step
@@ -237,8 +231,7 @@ Set `precision = "int4"` or `precision = "fp4"` in the script.
 
 Run from the repository root:
 
-```bash
-python - <<'PY'
+```python
 import math
 from pathlib import Path
 
@@ -316,5 +309,4 @@ image = pipe(
 output_path.parent.mkdir(parents=True, exist_ok=True)
 image.save(output_path)
 print(f"saved {output_path}")
-PY
 ```

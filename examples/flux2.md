@@ -6,8 +6,7 @@ Set `precision = "int4"` or `precision = "fp4"` in the script.
 
 Run from the repository root:
 
-```bash
-python - <<'PY'
+```python
 from pathlib import Path
 
 import torch
@@ -48,5 +47,4 @@ image = pipe(
 output_path.parent.mkdir(parents=True, exist_ok=True)
 image.save(output_path)
 print(f"saved {output_path}")
-PY
 ```
