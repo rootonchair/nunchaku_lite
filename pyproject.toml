@@ -1,0 +1,26 @@
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = [
+  "ninja",
+  "setuptools",
+  "torch>=2.7",
+  "wheel",
+]
+
+[project]
+name = "nunchaku_lite"
+requires-python = ">=3.10"
+dynamic = [ "version" ]
+dependencies = [
+  "diffusers>=0.36",
+  "huggingface-hub>=0.34",
+  "safetensors",
+  "torch>=2.7",
+]
+
+[tool.black]
+line-length = 120
+target-version = [ 'py311' ]
+
+[tool.ruff]
+line-length = 120
