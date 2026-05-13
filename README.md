@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="nunchaku_lite" width="640">
+</p>
+
 # nunchaku_lite
 
 `nunchaku_lite` is a small, plugin-oriented runtime package for applying Nunchaku v2 quantized transformer weights to existing Diffusers pipelines. It is designed to patch a pipeline's transformer module in place, so downstream code can keep using standard Diffusers pipeline classes without subclassing or importing the full `nunchaku` package.
