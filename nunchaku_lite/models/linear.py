@@ -1,3 +1,5 @@
+"""Quantized linear modules backed by Nunchaku Lite native kernels."""
+
 import torch
 from torch import nn
 
@@ -7,6 +9,13 @@ from ..ops.quantize import svdq_quantize_w4a4_act_fuse_lora_cuda
 
 
 class SVDQW4A4Linear(nn.Module):
+    """SVDQ W4A4 linear projection with low-rank correction parameters.
+
+    The module owns the parameter buffers expected by Nunchaku SVDQ
+    checkpoints. Parameters are allocated empty and are populated later through
+    ``load_state_dict``.
+    """
+
     def __init__(
         self,
         in_features: int,
@@ -18,6 +27,27 @@ class SVDQW4A4Linear(nn.Module):
         torch_dtype: torch.dtype = torch.bfloat16,
         device: str | torch.device | None = None,
     ):
+        """Allocate SVDQ parameter buffers for a quantized linear projection.
+
+        Args:
+            in_features: Input feature dimension.
+            out_features: Output feature dimension.
+            rank: Low-rank correction rank.
+            bias: Whether to allocate a bias parameter.
+            precision: Native weight precision, either ``"int4"`` or
+                ``"nvfp4"``.
+            act_unsigned: Whether the activation quantization path should use
+                unsigned activations.
+            torch_dtype: Runtime dtype for floating-point buffers.
+            device: Device for parameter allocation.
+
+        Raises:
+            ValueError: If ``precision`` is unsupported.
+
+        Returns:
+            None.
+        """
+
         super().__init__()
         if device is None:
             device = torch.device("cpu")
@@ -73,6 +103,18 @@ class SVDQW4A4Linear(nn.Module):
 
     @classmethod
     def from_linear(cls, linear: nn.Linear, **kwargs):
+        """Create an empty SVDQ module with metadata copied from ``linear``.
+
+        Args:
+            linear: Source dense linear layer.
+            **kwargs: Constructor overrides such as ``rank``, ``precision``,
+                ``torch_dtype``, ``device``, or ``in_features``.
+
+        Returns:
+            New :class:`SVDQW4A4Linear` with matching output shape and bias
+            presence.
+        """
+
         in_features = kwargs.pop("in_features", linear.in_features)
         torch_dtype = kwargs.pop("torch_dtype", linear.weight.dtype)
         device = kwargs.pop("device", linear.weight.device)
@@ -86,6 +128,17 @@ class SVDQW4A4Linear(nn.Module):
         )
 
     def quantize(self, x: torch.Tensor, pad_size: int = 256) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Quantize activations and compute the low-rank activation side output.
+
+        Args:
+            x: Flattened activation tensor with shape ``(tokens, channels)``.
+            pad_size: Token padding multiple required by the native quantizer.
+
+        Returns:
+            Tuple of quantized activations, activation scales, and low-rank
+            activation output.
+        """
+
         return svdq_quantize_w4a4_act_fuse_lora_cuda(
             x,
             lora_down=self.proj_down,
@@ -101,6 +154,19 @@ class SVDQW4A4Linear(nn.Module):
         lora_act: torch.Tensor,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Run native W4A4 GEMM on already-quantized activations.
+
+        Args:
+            quantized_x: Quantized activation tensor returned by
+                :meth:`quantize`.
+            ascales: Activation scales returned by :meth:`quantize`.
+            lora_act: Low-rank activation tensor returned by :meth:`quantize`.
+            output: Optional preallocated output tensor.
+
+        Returns:
+            Projection output tensor.
+        """
+
         if output is None:
             output = torch.empty(
                 quantized_x.shape[0], self.out_features, dtype=self.proj_up.dtype, device=quantized_x.device
@@ -122,6 +188,16 @@ class SVDQW4A4Linear(nn.Module):
         return output
 
     def forward(self, x: torch.Tensor, output: torch.Tensor | None = None) -> torch.Tensor:
+        """Apply the quantized projection to a batched sequence tensor.
+
+        Args:
+            x: Input tensor with shape ``(batch, sequence, channels)``.
+            output: Optional flattened preallocated output buffer.
+
+        Returns:
+            Output tensor with shape ``(batch, sequence, out_features)``.
+        """
+
         batch_size, seq_len, channels = x.shape
         x = x.reshape(batch_size * seq_len, channels)
         if output is None:
@@ -131,6 +207,16 @@ class SVDQW4A4Linear(nn.Module):
         return output.reshape(batch_size, seq_len, -1)
 
     def __repr__(self):
+        """Return a compact representation with quantization metadata.
+
+        Args:
+            None.
+
+        Returns:
+            Debug string containing feature sizes, rank, precision, and
+            activation signedness.
+        """
+
         return (
             f"SVDQW4A4Linear(in_features={self.in_features}, out_features={self.out_features}, "
             f"rank={self.rank}, precision={self.precision}, act_unsigned={self.act_unsigned})"
@@ -138,6 +224,12 @@ class SVDQW4A4Linear(nn.Module):
 
 
 class AWQW4A16Linear(nn.Module):
+    """AWQ W4A16 linear projection used by selected Flux adapter paths.
+
+    This module stores packed AWQ checkpoint buffers and dispatches to the
+    native GEMV kernel at runtime.
+    """
+
     def __init__(
         self,
         in_features: int,
@@ -147,6 +239,20 @@ class AWQW4A16Linear(nn.Module):
         torch_dtype: torch.dtype = torch.bfloat16,
         device: str | torch.device | None = None,
     ):
+        """Create an empty AWQ linear module with packed weight buffers.
+
+        Args:
+            in_features: Input feature dimension.
+            out_features: Output feature dimension.
+            bias: Whether to allocate a bias parameter.
+            group_size: AWQ scale/zero group size.
+            torch_dtype: Runtime dtype for floating-point buffers.
+            device: Device for parameter allocation.
+
+        Returns:
+            None.
+        """
+
         super().__init__()
         if device is None:
             device = torch.device("cpu")
@@ -180,6 +286,20 @@ class AWQW4A16Linear(nn.Module):
         device: str | torch.device | None = None,
         **kwargs,
     ):
+        """Create an empty AWQ module with metadata copied from ``linear``.
+
+        Args:
+            linear: Source dense linear layer.
+            group_size: AWQ group size.
+            torch_dtype: Runtime dtype for floating-point buffers.
+            device: Optional allocation device. Defaults to the source
+                linear's device.
+            **kwargs: Ignored compatibility kwargs accepted by adapter helpers.
+
+        Returns:
+            New :class:`AWQW4A16Linear`.
+        """
+
         if device is None:
             device = linear.weight.device
         return cls(
@@ -192,6 +312,16 @@ class AWQW4A16Linear(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply the AWQ projection using the native GEMV kernel.
+
+        Args:
+            x: Input activation tensor whose last dimension is
+                ``in_features``.
+
+        Returns:
+            Output tensor with last dimension ``out_features``.
+        """
+
         output = awq_gemv_w4a16_cuda(
             in_feats=x,
             kernel=self.qweight,
@@ -207,6 +337,15 @@ class AWQW4A16Linear(nn.Module):
         return output
 
     def __repr__(self):
+        """Return a compact representation with AWQ metadata.
+
+        Args:
+            None.
+
+        Returns:
+            Debug string containing feature sizes and group size.
+        """
+
         return (
             f"AWQW4A16Linear(in_features={self.in_features}, out_features={self.out_features}, "
             f"group_size={self.group_size})"

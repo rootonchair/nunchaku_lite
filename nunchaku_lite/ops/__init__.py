@@ -1,3 +1,5 @@
+"""Python wrappers around the Nunchaku Lite native extension kernels."""
+
 from .attention import attention_fp16_cuda
 from .gemm import svdq_gemm_w4a4_cuda
 from .gemv import awq_gemv_w4a16_cuda

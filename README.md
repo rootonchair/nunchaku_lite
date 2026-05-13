@@ -351,8 +351,15 @@ benchmarks/        End-to-end benchmark scripts
 tests/             Unit tests
 ```
 
+## License
+
+`nunchaku_lite` is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
+
+## Acknowledgements
+
+`nunchaku_lite` builds on the Nunchaku project and uses selected native kernel code and third-party header-only dependencies needed for the lite runtime, including CUTLASS, nlohmann/json, mio, and spdlog. We are grateful to the maintainers and contributors of these projects.
+
 ## Notes
 
 - `nunchaku_lite` does not import or require the full `nunchaku` Python package.
 - Generated artifacts, local outputs, compiled extensions, caches, and virtual environments are intentionally ignored by git.
-- No license file is currently included in this repository. Add one before public distribution.

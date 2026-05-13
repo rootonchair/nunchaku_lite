@@ -1,3 +1,5 @@
+"""General checkpoint, tensor-shape, and precision helpers for Nunchaku Lite."""
+
 import json
 from pathlib import Path
 from typing import Any
@@ -8,10 +10,33 @@ from huggingface_hub import hf_hub_download
 
 
 def ceil_divide(x: int, divisor: int) -> int:
+    """Return integer ceiling division.
+
+    Args:
+        x: Dividend.
+        divisor: Divisor.
+
+    Returns:
+        Smallest integer greater than or equal to ``x / divisor``.
+    """
+
     return (x + divisor - 1) // divisor
 
 
 def pad_tensor(tensor: torch.Tensor | None, multiples: int, dim: int, fill: Any = 0) -> torch.Tensor | None:
+    """Pad a tensor along one dimension to a requested multiple.
+
+    Args:
+        tensor: Tensor to pad. ``None`` is accepted and returned unchanged.
+        multiples: Required multiple for the selected dimension.
+        dim: Dimension to pad.
+        fill: Fill value for padded elements.
+
+    Returns:
+        The original tensor if no padding is required, otherwise a new padded
+        tensor. Returns ``None`` when ``tensor`` is ``None``.
+    """
+
     if multiples <= 1 or tensor is None:
         return tensor
     shape = list(tensor.shape)
@@ -25,6 +50,22 @@ def pad_tensor(tensor: torch.Tensor | None, multiples: int, dim: int, fill: Any 
 
 
 def fetch_or_download(path: str | Path, repo_type: str = "model") -> Path:
+    """Resolve a local path or download a Hugging Face checkpoint path.
+
+    Args:
+        path: Local path, or a Hugging Face path formatted as
+            ``org/repo/path/to/file``.
+        repo_type: Hugging Face Hub repository type passed to
+            :func:`hf_hub_download`.
+
+    Returns:
+        Local filesystem path to the requested file.
+
+    Raises:
+        ValueError: If a non-local path does not contain enough components to
+            infer ``repo_id`` and filename.
+    """
+
     path = Path(path)
     if path.exists():
         return path
@@ -45,6 +86,20 @@ def load_state_dict_in_safetensors(
     filter_prefix: str = "",
     return_metadata: bool = False,
 ) -> dict[str, torch.Tensor] | tuple[dict[str, torch.Tensor], dict[str, str]]:
+    """Load tensors from a safetensors checkpoint with optional prefix filtering.
+
+    Args:
+        path: Local or Hugging Face safetensors checkpoint path.
+        device: Device argument passed to ``safetensors.safe_open``.
+        filter_prefix: Optional key prefix to keep. The prefix is removed from
+            returned keys.
+        return_metadata: Whether to return safetensors metadata with tensors.
+
+    Returns:
+        State dict when ``return_metadata`` is false. Otherwise returns
+        ``(state_dict, metadata)``.
+    """
+
     state_dict = {}
     with safetensors.safe_open(fetch_or_download(path), framework="pt", device=device) as f:
         metadata = f.metadata()
@@ -62,6 +117,21 @@ def get_precision(
     device: str | torch.device = "cuda",
     pretrained_model_name_or_path: str | Path | None = None,
 ) -> str:
+    """Resolve public precision selection.
+
+    Args:
+        precision: ``"auto"``, ``"int4"``, or ``"fp4"``.
+        device: Device used to inspect CUDA capability for ``"auto"``.
+        pretrained_model_name_or_path: Optional checkpoint path used as a name
+            hint when hardware alone does not imply fp4.
+
+    Returns:
+        Public precision name, either ``"int4"`` or ``"fp4"``.
+
+    Raises:
+        ValueError: If ``precision`` is not one of the supported values.
+    """
+
     if precision not in ("auto", "int4", "fp4"):
         raise ValueError("precision must be one of 'auto', 'int4', or 'fp4'")
     if precision != "auto":
@@ -86,6 +156,17 @@ def get_precision(
 def patch_scale_key(
     transformer_from_config: torch.nn.Module, state_dict_from_checkpoint: dict[str, torch.Tensor]
 ) -> None:
+    """Normalize scale-related checkpoint keys expected by SVDQ modules.
+
+    Args:
+        transformer_from_config: Patched transformer whose state dict defines
+            the expected SVDQ key set.
+        state_dict_from_checkpoint: Mutable checkpoint state dict to update.
+
+    Returns:
+        ``None``. The checkpoint state is modified in place.
+    """
+
     state_dict = transformer_from_config.state_dict()
     for key in state_dict:
         if key not in state_dict_from_checkpoint:
@@ -101,6 +182,20 @@ def patch_scale_key(
 
 
 def convert_fp16(transformer_from_config: torch.nn.Module, state_dict_from_checkpoint: dict[str, torch.Tensor]) -> None:
+    """Convert bf16 checkpoint tensors to fp16 where the model expects fp16.
+
+    Args:
+        transformer_from_config: Patched transformer defining target dtypes.
+        state_dict_from_checkpoint: Mutable checkpoint state dict to update.
+
+    Raises:
+        ValueError: If a dtype mismatch is not the supported bf16-to-fp16
+            conversion.
+
+    Returns:
+        None.
+    """
+
     for key, value in transformer_from_config.state_dict().items():
         checkpoint_value = state_dict_from_checkpoint.get(key)
         if checkpoint_value is None or value.dtype == checkpoint_value.dtype:
@@ -115,6 +210,18 @@ def convert_fp16(transformer_from_config: torch.nn.Module, state_dict_from_check
 
 
 def parse_config_metadata(metadata: dict[str, str] | None) -> dict[str, Any]:
+    """Parse optional JSON ``config`` metadata from a safetensors file.
+
+    Args:
+        metadata: Safetensors metadata dictionary, or ``None``.
+
+    Returns:
+        Parsed config object, or an empty dict when absent.
+
+    Raises:
+        ValueError: If the config value does not decode to a JSON object.
+    """
+
     if not metadata or "config" not in metadata:
         return {}
     parsed = json.loads(metadata["config"])

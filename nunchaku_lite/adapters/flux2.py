@@ -1,3 +1,5 @@
+"""Flux2 adapter for patching Diffusers Flux2 transformers with Nunchaku Lite modules."""
+
 import math
 import types
 from typing import Any
@@ -34,6 +36,19 @@ from .common import (
 
 
 def _pack_flux2_rotary_emb(freqs_cis: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+    """Pack Diffusers Flux2 rotary embeddings for native kernels.
+
+    Args:
+        freqs_cis: ``(cos, sin)`` tuple produced by Diffusers Flux2 positional
+            embeddings. Both tensors must have shape ``(sequence, dim)``.
+
+    Returns:
+        Float32 packed rotary tensor accepted by the native SVDQ GEMM kernels.
+
+    Raises:
+        ValueError: If the tuple tensors do not have matching 2D shapes.
+    """
+
     cos, sin = freqs_cis
     if cos.ndim != 2 or sin.ndim != 2 or cos.shape != sin.shape:
         raise ValueError("Expected Flux.2 rotary embeddings as a (cos, sin) tuple with shape (seq_len, dim).")
@@ -51,6 +66,21 @@ def _flux2_kv_causal_attention(
     kv_cache=None,
     backend=None,
 ) -> torch.Tensor:
+    """Apply Flux2 reference-token causal attention with optional KV-cache reuse.
+
+    Args:
+        query: Query tensor for the full sequence.
+        key: Key tensor for the full sequence.
+        value: Value tensor for the full sequence.
+        num_txt_tokens: Number of leading text tokens.
+        num_ref_tokens: Number of reference tokens after the text tokens.
+        kv_cache: Optional cache object exposing ``get`` and ``store``.
+        backend: Optional Diffusers attention backend override.
+
+    Returns:
+        Attention output with the same sequence layout as ``query``.
+    """
+
     if num_ref_tokens == 0 and kv_cache is None:
         return dispatch_attention_fn(query, key, value, backend=backend)
 
@@ -83,7 +113,20 @@ def _flux2_kv_causal_attention(
 
 
 class LiteFlux2Attention(nn.Module):
+    """Lite replacement for Flux2 cross-stream attention with SVDQ projections."""
+
     def __init__(self, other: Flux2Attention, context: SVDQPatchContext | None = None, **kwargs):
+        """Copy attention metadata and replace QKV/output projections.
+
+        Args:
+            other: Source Diffusers Flux2 attention module.
+            context: Shared SVDQ patch settings.
+            **kwargs: Additional SVDQ constructor overrides.
+
+        Returns:
+            None.
+        """
+
         super().__init__()
         self.head_dim = other.head_dim
         self.inner_dim = other.inner_dim
@@ -122,6 +165,22 @@ class LiteFlux2Attention(nn.Module):
         image_rotary_emb: tuple[torch.Tensor, torch.Tensor] | torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Run Flux2 attention, choosing packed native attention when possible.
+
+        Args:
+            hidden_states: Image hidden states.
+            encoder_hidden_states: Optional text/context hidden states.
+            attention_mask: Optional attention mask.
+            image_rotary_emb: Either Diffusers rotary tuple/tensor or packed
+                rotary tensors, depending on the forward path.
+            **kwargs: Optional KV-cache and reference-token controls.
+
+        Returns:
+            Hidden-state output for single-stream attention, or
+            ``(hidden_states, encoder_hidden_states)`` for double-stream
+            attention.
+        """
+
         kv_cache = kwargs.get("kv_cache", None)
         kv_cache_mode = kwargs.get("kv_cache_mode", None)
         num_ref_tokens = int(kwargs.get("num_ref_tokens", 0))
@@ -180,6 +239,18 @@ class LiteFlux2Attention(nn.Module):
         encoder_hidden_states: torch.Tensor,
         image_rotary_emb: tuple[torch.Tensor, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run padded native fp16 attention for separate image and text streams.
+
+        Args:
+            hidden_states: Image hidden states.
+            encoder_hidden_states: Text/context hidden states.
+            image_rotary_emb: Packed ``(image_rope, text_rope)`` tuple.
+
+        Returns:
+            Tuple ``(hidden_states, encoder_hidden_states)`` after attention and
+            output projections.
+        """
+
         batch_size = hidden_states.shape[0]
         num_txt_tokens = encoder_hidden_states.shape[1]
         num_img_tokens = hidden_states.shape[1]
@@ -230,6 +301,18 @@ class LiteFlux2Attention(nn.Module):
         encoder_hidden_states: torch.Tensor | None,
         image_rotary_emb: tuple[torch.Tensor, torch.Tensor] | torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+        """Project image and optional text states to Q/K/V tensors.
+
+        Args:
+            hidden_states: Image hidden states.
+            encoder_hidden_states: Optional text/context states.
+            image_rotary_emb: Rotary data used by either packed native or
+                Diffusers fallback paths.
+
+        Returns:
+            Tuple ``(query, key, value, encoder_seq_len)``.
+        """
+
         batch_size = hidden_states.shape[0]
         packed_rotary = (
             isinstance(image_rotary_emb, tuple)
@@ -288,7 +371,20 @@ class LiteFlux2Attention(nn.Module):
 
 
 class LiteFlux2FeedForward(nn.Module):
+    """Quantized Flux2 feed-forward block."""
+
     def __init__(self, other: Flux2FeedForward, context: SVDQPatchContext | None = None, **kwargs):
+        """Replace feed-forward projections with SVDQ modules.
+
+        Args:
+            other: Source Diffusers Flux2 feed-forward module.
+            context: Shared SVDQ patch settings.
+            **kwargs: Additional SVDQ constructor overrides.
+
+        Returns:
+            None.
+        """
+
         super().__init__()
         self.linear_in = svdq_from_linear(other.linear_in, context, **kwargs)
         self.act_fn = other.act_fn
@@ -296,13 +392,35 @@ class LiteFlux2FeedForward(nn.Module):
         self.linear_out.act_unsigned = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply the quantized feed-forward block.
+
+        Args:
+            x: Input hidden states.
+
+        Returns:
+            Feed-forward output tensor.
+        """
+
         x = self.linear_in(x)
         x = self.act_fn(x)
         return self.linear_out(x)
 
 
 class LiteFlux2ParallelSelfAttention(nn.Module):
+    """Lite replacement for Flux2 parallel self-attention plus MLP blocks."""
+
     def __init__(self, other: Flux2ParallelSelfAttention, context: SVDQPatchContext | None = None, **kwargs):
+        """Split Flux2 fused parallel projections into lite SVDQ modules.
+
+        Args:
+            other: Source Diffusers parallel self-attention module.
+            context: Shared SVDQ patch settings.
+            **kwargs: Additional SVDQ constructor overrides.
+
+        Returns:
+            None.
+        """
+
         super().__init__()
         self.head_dim = other.head_dim
         self.inner_dim = other.inner_dim
@@ -340,6 +458,20 @@ class LiteFlux2ParallelSelfAttention(nn.Module):
         image_rotary_emb: torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None = None,
         **kwargs,
     ) -> torch.Tensor:
+        """Run parallel self-attention and MLP.
+
+        Args:
+            hidden_states: Joint hidden states.
+            attention_mask: Optional attention mask.
+            image_rotary_emb: Rotary tensor for fallback paths or packed rotary
+                tensor for native paths.
+            **kwargs: Optional KV-cache, text-token, and reference-token
+                controls.
+
+        Returns:
+            Sum of attention output projection and MLP projection.
+        """
+
         kv_cache = kwargs.get("kv_cache", None)
         kv_cache_mode = kwargs.get("kv_cache_mode", None)
         num_txt_tokens = int(kwargs.get("num_txt_tokens", 0))
@@ -396,6 +528,16 @@ class LiteFlux2ParallelSelfAttention(nn.Module):
         return self.out_proj(attn_output) + self.mlp_fc2(mlp_hidden_states)
 
     def _forward_packed(self, hidden_states: torch.Tensor, image_rotary_emb: torch.Tensor) -> torch.Tensor:
+        """Run padded native fp16 attention for a single packed sequence.
+
+        Args:
+            hidden_states: Joint hidden states.
+            image_rotary_emb: Packed rotary tensor for the joint sequence.
+
+        Returns:
+            Combined attention and MLP output.
+        """
+
         batch_size = hidden_states.shape[0]
         num_tokens = hidden_states.shape[1]
         query, key, value, num_tokens_pad = _alloc_packed_qkv(
@@ -424,7 +566,20 @@ class LiteFlux2ParallelSelfAttention(nn.Module):
 
 
 class LiteFlux2TransformerBlock(nn.Module):
+    """Lite replacement for Flux2 double-stream transformer blocks."""
+
     def __init__(self, block: Flux2TransformerBlock, context: SVDQPatchContext | None = None, **kwargs):
+        """Replace double-stream attention and feed-forward modules.
+
+        Args:
+            block: Source Diffusers Flux2 double-stream block.
+            context: Shared SVDQ patch settings.
+            **kwargs: Additional SVDQ constructor overrides.
+
+        Returns:
+            None.
+        """
+
         super().__init__()
         self.mlp_hidden_dim = block.mlp_hidden_dim
         self.norm1 = block.norm1
@@ -444,6 +599,20 @@ class LiteFlux2TransformerBlock(nn.Module):
         image_rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
         joint_attention_kwargs: dict[str, Any] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run one Flux2 double-stream block over image and text states.
+
+        Args:
+            hidden_states: Image hidden states.
+            encoder_hidden_states: Text/context hidden states.
+            temb_mod_img: Image modulation tensor.
+            temb_mod_txt: Text modulation tensor.
+            image_rotary_emb: Packed ``(image_rope, text_rope)`` tuple.
+            joint_attention_kwargs: Optional attention kwargs.
+
+        Returns:
+            Tuple ``(encoder_hidden_states, hidden_states)`` after the block.
+        """
+
         joint_attention_kwargs = joint_attention_kwargs or {}
         (shift_msa, scale_msa, gate_msa), (shift_mlp, scale_mlp, gate_mlp) = Flux2Modulation.split(temb_mod_img, 2)
         (c_shift_msa, c_scale_msa, c_gate_msa), (c_shift_mlp, c_scale_mlp, c_gate_mlp) = Flux2Modulation.split(
@@ -479,7 +648,20 @@ class LiteFlux2TransformerBlock(nn.Module):
 
 
 class LiteFlux2SingleTransformerBlock(nn.Module):
+    """Lite replacement for Flux2 single-stream transformer blocks."""
+
     def __init__(self, block: Flux2SingleTransformerBlock, context: SVDQPatchContext | None = None, **kwargs):
+        """Replace the single-stream parallel attention module.
+
+        Args:
+            block: Source Diffusers Flux2 single-stream block.
+            context: Shared SVDQ patch settings.
+            **kwargs: Additional SVDQ constructor overrides.
+
+        Returns:
+            None.
+        """
+
         super().__init__()
         self.norm = block.norm
         self.attn = LiteFlux2ParallelSelfAttention(block.attn, context=context, **kwargs)
@@ -494,6 +676,25 @@ class LiteFlux2SingleTransformerBlock(nn.Module):
         split_hidden_states: bool = False,
         text_seq_len: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
+        """Run one Flux2 single-stream block and optionally split text/image states.
+
+        Args:
+            hidden_states: Joint or image hidden states.
+            encoder_hidden_states: Optional text/context states to concatenate
+                before the block.
+            temb_mod: Single-stream modulation tensor.
+            image_rotary_emb: Rotary tensor for the joint sequence.
+            joint_attention_kwargs: Optional attention kwargs.
+            split_hidden_states: Whether to split text and image streams before
+                returning.
+            text_seq_len: Text token count used when splitting a pre-concatenated
+                sequence.
+
+        Returns:
+            Joint hidden states, or ``(encoder_hidden_states, hidden_states)``
+            when ``split_hidden_states`` is true.
+        """
+
         if encoder_hidden_states is not None:
             text_seq_len = encoder_hidden_states.shape[1]
             hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
@@ -531,6 +732,29 @@ def lite_flux2_forward(
     num_ref_tokens: int = 0,
     ref_fixed_timestep: float = 0.0,
 ) -> torch.Tensor | Transformer2DModelOutput:
+    """Flux2 transformer forward wrapper that pre-packs RoPE for lite modules.
+
+    Args:
+        self: Patched Flux2 transformer instance.
+        hidden_states: Input image latents.
+        encoder_hidden_states: Text/context hidden states.
+        timestep: Diffusion timestep tensor.
+        img_ids: Image token position ids.
+        txt_ids: Text token position ids.
+        guidance: Optional guidance tensor.
+        joint_attention_kwargs: Optional kwargs forwarded to attention blocks.
+        return_dict: Whether to return ``Transformer2DModelOutput``.
+        kv_cache: Optional KV cache object for fallback cached modes.
+        kv_cache_mode: Optional cache mode. Non-``None`` delegates to the
+            original Diffusers forward.
+        num_ref_tokens: Number of reference tokens for cached modes.
+        ref_fixed_timestep: Reference timestep value for cached modes.
+
+    Returns:
+        Diffusers transformer output object, or tuple when ``return_dict`` is
+        false.
+    """
+
     if kv_cache_mode is not None:
         return self._nunchaku_lite_flux2_original_forward(
             hidden_states=hidden_states,
@@ -626,9 +850,20 @@ def lite_flux2_forward(
 
 
 class Flux2Adapter:
+    """Adapter for Diffusers ``Flux2Transformer2DModel`` checkpoints."""
+
     target = "flux2"
 
     def matches(self, transformer: torch.nn.Module) -> bool:
+        """Return whether ``transformer`` is a Diffusers Flux2 transformer.
+
+        Args:
+            transformer: Candidate module.
+
+        Returns:
+            ``True`` when the class name and module path match Diffusers Flux2.
+        """
+
         return (
             transformer.__class__.__name__ == "Flux2Transformer2DModel"
             and "transformer_flux2" in transformer.__class__.__module__
@@ -641,6 +876,18 @@ class Flux2Adapter:
         quantization_config: dict[str, Any],
         options: PatchOptions,
     ) -> dict[str, torch.Tensor]:
+        """Patch a Flux2 transformer in place and install the lite forward wrapper.
+
+        Args:
+            transformer: Diffusers Flux2 transformer to mutate.
+            checkpoint_state: Checkpoint tensors to load after patching.
+            quantization_config: Quantization metadata from the checkpoint.
+            options: Normalized patch options.
+
+        Returns:
+            Checkpoint state dict to load into the patched transformer.
+        """
+
         context = build_svdq_context(transformer, quantization_config, options)
         prepare_transformer_dtype(transformer, context)
         for index, block in enumerate(transformer.transformer_blocks):

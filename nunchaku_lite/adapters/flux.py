@@ -1,3 +1,5 @@
+"""Flux adapter for patching Diffusers Flux transformers with Nunchaku Lite modules."""
+
 from typing import Any
 
 import torch
@@ -31,6 +33,21 @@ from .common import (
 
 
 def rope(pos: torch.Tensor, dim: int, theta: int) -> torch.Tensor:
+    """Build real-valued Flux rotary embedding pairs for one positional axis.
+
+    Args:
+        pos: Position ids for one axis with shape ``(batch, sequence)``.
+        dim: Rotary dimension assigned to this axis. Must be even.
+        theta: Frequency base used by Flux rotary embeddings.
+
+    Returns:
+        Float32 rotary tensor shaped ``(batch, sequence, dim // 2, 1, 2)``
+        containing ``sin`` and ``cos`` pairs.
+
+    Raises:
+        ValueError: If ``dim`` is not even.
+    """
+
     if dim % 2 != 0:
         raise ValueError("Rotary dimension must be even.")
     scale = torch.arange(0, dim, 2, dtype=torch.float64, device=pos.device) / dim
@@ -42,13 +59,36 @@ def rope(pos: torch.Tensor, dim: int, theta: int) -> torch.Tensor:
 
 
 class LiteFluxPosEmbed(nn.Module):
+    """Flux positional embedder that returns RoPE tensors in the native packable layout."""
+
     def __init__(self, dim: int, theta: int, axes_dim: tuple[int, ...] | list[int]):
+        """Store Flux rotary-axis dimensions and frequency base.
+
+        Args:
+            dim: Total transformer hidden dimension.
+            theta: Rotary frequency base.
+            axes_dim: Per-axis rotary dimensions.
+
+        Returns:
+            None.
+        """
+
         super().__init__()
         self.dim = dim
         self.theta = theta
         self.axes_dim = axes_dim
 
     def forward(self, ids: torch.Tensor) -> torch.Tensor:
+        """Return concatenated per-axis rotary embeddings.
+
+        Args:
+            ids: Flux positional ids. The last dimension indexes rotary axes.
+
+        Returns:
+            Rotary tensor in the native packable layout expected by
+            :func:`prepare_flux_rotary`.
+        """
+
         if Version(diffusers.__version__) >= Version("0.31.0"):
             ids = ids[None, ...]
         n_axes = ids.shape[-1]
@@ -61,6 +101,23 @@ def prepare_flux_rotary(
     text_tokens: int,
     image_tokens: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    """Split and pack Flux rotary embeddings for text, image, and joint streams.
+
+    Args:
+        image_rotary_emb: Diffusers Flux rotary tensor, or ``None`` when the
+            caller is running without RoPE.
+        text_tokens: Number of text tokens at the front of the joint sequence.
+        image_tokens: Number of image tokens after the text tokens.
+
+    Returns:
+        ``None`` if no rotary embedding is provided. Otherwise returns packed
+        ``(text_rope, image_rope, joint_rope)`` tensors.
+
+    Raises:
+        ValueError: If a Flux2-style tuple is provided or token counts do not
+            match the rotary tensor.
+    """
+
     if image_rotary_emb is None:
         return None
     if isinstance(image_rotary_emb, tuple):
@@ -76,7 +133,20 @@ def prepare_flux_rotary(
 
 
 class LiteAdaLayerNormZero(nn.Module):
+    """Flux AdaLayerNormZero variant whose projection uses AWQ W4A16 weights."""
+
     def __init__(self, other: AdaLayerNormZero, scale_shift: float = 1.0, torch_dtype: torch.dtype = torch.bfloat16):
+        """Copy normalization components and replace the modulation projection.
+
+        Args:
+            other: Source Diffusers AdaLayerNormZero module.
+            scale_shift: Additive offset applied to scale outputs.
+            torch_dtype: Runtime dtype for AWQ modulation projection buffers.
+
+        Returns:
+            None.
+        """
+
         super().__init__()
         self.scale_shift = scale_shift
         self.emb = other.emb
@@ -92,6 +162,20 @@ class LiteAdaLayerNormZero(nn.Module):
         hidden_dtype: torch.dtype | None = None,
         emb: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Apply adaptive normalization and return gates and MLP modulation.
+
+        Args:
+            x: Hidden states to normalize.
+            timestep: Optional timestep input for the copied embedding module.
+            class_labels: Optional class labels for the copied embedding module.
+            hidden_dtype: Optional dtype hint for the copied embedding module.
+            emb: Precomputed modulation embedding. Used when ``self.emb`` is
+                absent.
+
+        Returns:
+            Tuple ``(norm_x, gate_msa, shift_mlp, scale_mlp, gate_mlp)``.
+        """
+
         if self.emb is not None:
             emb = self.emb(timestep, class_labels, hidden_dtype=hidden_dtype)
         emb = self.linear(self.silu(emb))
@@ -106,9 +190,22 @@ class LiteAdaLayerNormZero(nn.Module):
 
 
 class LiteAdaLayerNormZeroSingle(nn.Module):
+    """Single-stream Flux AdaLayerNormZero variant using AWQ for modulation."""
+
     def __init__(
         self, other: AdaLayerNormZeroSingle, scale_shift: float = 1.0, torch_dtype: torch.dtype = torch.bfloat16
     ):
+        """Copy single-stream normalization components and replace projection.
+
+        Args:
+            other: Source Diffusers AdaLayerNormZeroSingle module.
+            scale_shift: Additive offset applied to scale outputs.
+            torch_dtype: Runtime dtype for AWQ modulation projection buffers.
+
+        Returns:
+            None.
+        """
+
         super().__init__()
         self.scale_shift = scale_shift
         self.silu = other.silu
@@ -116,6 +213,16 @@ class LiteAdaLayerNormZeroSingle(nn.Module):
         self.norm = other.norm
 
     def forward(self, x: torch.Tensor, emb: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply single-stream adaptive normalization.
+
+        Args:
+            x: Hidden states to normalize.
+            emb: Precomputed modulation embedding.
+
+        Returns:
+            Tuple ``(norm_x, gate_msa)``.
+        """
+
         emb = self.linear(self.silu(emb))
         emb = emb.view(emb.shape[0], -1, 3).permute(2, 0, 1)
         shift_msa, scale_msa, gate_msa = emb
@@ -127,10 +234,23 @@ class LiteAdaLayerNormZeroSingle(nn.Module):
 
 
 class LiteFluxAttnProcessor(nn.Module):
+    """Attention processor for lite Flux attention modules, including optional IP-Adapter state."""
+
     _attention_backend = None
     _parallel_config = None
 
     def __init__(self, diffusers_processor: nn.Module | None = None):
+        """Copy optional IP-Adapter projections from a Diffusers processor.
+
+        Args:
+            diffusers_processor: Optional Diffusers attention processor. When
+                it is a ``FluxIPAdapterAttnProcessor``, IP-Adapter weights and
+                scales are reused by the lite processor.
+
+        Returns:
+            None.
+        """
+
         super().__init__()
         self.hidden_size = None
         self.cross_attention_dim = None
@@ -146,6 +266,15 @@ class LiteFluxAttnProcessor(nn.Module):
 
     @property
     def supports_ip_adapter(self) -> bool:
+        """Return whether this processor has IP-Adapter key/value projections.
+
+        Args:
+            None.
+
+        Returns:
+            ``True`` when both IP key and value projections are available.
+        """
+
         return self.to_k_ip is not None and self.to_v_ip is not None
 
     def forward(
@@ -159,6 +288,32 @@ class LiteFluxAttnProcessor(nn.Module):
         ip_adapter_masks: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run Flux attention using fused QKV projection.
+
+        Args:
+            attn: Lite Flux attention module that owns the projections.
+            hidden_states: Image or joint hidden states.
+            encoder_hidden_states: Optional text hidden states for double-stream
+                attention.
+            attention_mask: Optional attention mask.
+            image_rotary_emb: Packed rotary tensor or ``(image, text)`` packed
+                rotary tuple.
+            ip_hidden_states: Optional IP-Adapter hidden states.
+            ip_adapter_masks: Optional IP-Adapter masks. Currently accepted for
+                API compatibility and not used by this processor.
+            **kwargs: Additional Diffusers attention kwargs.
+
+        Returns:
+            Single-stream output tensor, ``(hidden, encoder)`` for double
+            stream, or ``(hidden, encoder, ip)`` when IP-Adapter output is
+            produced.
+
+        Raises:
+            ValueError: If double-stream rotary embeddings are not provided as
+                an image/text tuple, or IP states are provided without IP
+                projections.
+        """
+
         rotary_hidden = image_rotary_emb[0] if isinstance(image_rotary_emb, tuple) else image_rotary_emb
         query, key, value = self._project_qkv(hidden_states, attn.to_qkv, attn.norm_q, attn.norm_k, rotary_hidden, attn)
         ip_query = query
@@ -236,6 +391,20 @@ class LiteFluxAttnProcessor(nn.Module):
         rotary_emb: torch.Tensor | None,
         attn,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Project hidden states to Q/K/V and apply Q/K norm plus packed RoPE.
+
+        Args:
+            hidden_states: Input states to project.
+            projection: Fused SVDQ QKV projection.
+            norm_q: Query normalization module.
+            norm_k: Key normalization module.
+            rotary_emb: Optional packed rotary embedding.
+            attn: Attention module providing head metadata.
+
+        Returns:
+            Tuple of query, key, and value tensors shaped for attention.
+        """
+
         qkv = fused_qkv_norm_rotary(hidden_states, projection, norm_q, norm_k, rotary_emb=rotary_emb)
         query, key, value = qkv.chunk(3, dim=-1)
         query = query.unflatten(-1, (attn.heads, attn.head_dim))
@@ -245,6 +414,8 @@ class LiteFluxAttnProcessor(nn.Module):
 
 
 class LiteFluxAttention(nn.Module):
+    """Lite replacement for Diffusers Flux attention with SVDQ QKV projections."""
+
     def __init__(
         self,
         other: FluxAttention,
@@ -252,6 +423,18 @@ class LiteFluxAttention(nn.Module):
         context: SVDQPatchContext | None = None,
         **kwargs,
     ):
+        """Copy attention metadata and replace dense projections with SVDQ modules.
+
+        Args:
+            other: Source Diffusers Flux attention module.
+            processor: Optional processor name or Diffusers processor to adapt.
+            context: Shared SVDQ patch settings.
+            **kwargs: Additional SVDQ constructor overrides.
+
+        Returns:
+            None.
+        """
+
         super().__init__()
         self.head_dim = other.head_dim
         self.inner_dim = other.inner_dim
@@ -293,6 +476,19 @@ class LiteFluxAttention(nn.Module):
         image_rotary_emb: tuple[torch.Tensor, torch.Tensor] | torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
+        """Dispatch to the configured lite attention processor.
+
+        Args:
+            hidden_states: Main hidden states.
+            encoder_hidden_states: Optional context/text hidden states.
+            attention_mask: Optional attention mask.
+            image_rotary_emb: Packed rotary tensor or image/text rotary tuple.
+            **kwargs: Additional processor kwargs.
+
+        Returns:
+            Attention processor output.
+        """
+
         return self.processor(
             self,
             hidden_states,
@@ -303,9 +499,30 @@ class LiteFluxAttention(nn.Module):
         )
 
     def get_processor(self):
+        """Return the installed attention processor.
+
+        Args:
+            None.
+
+        Returns:
+            Current attention processor instance.
+        """
+
         return self.processor
 
     def set_processor(self, processor) -> None:
+        """Install a supported Flux attention processor.
+
+        Args:
+            processor: Processor name or Diffusers processor instance.
+
+        Raises:
+            ValueError: If the processor type is unsupported.
+
+        Returns:
+            None.
+        """
+
         if isinstance(processor, str):
             if processor not in ("flashattn2", "sdpa"):
                 raise ValueError(f"Processor {processor} is not supported")
@@ -322,13 +539,36 @@ class LiteFluxAttention(nn.Module):
 
 
 class LiteFluxFeedForward(nn.Module):
+    """Quantized Flux feed-forward wrapper with a fused GELU MLP fast path."""
+
     def __init__(self, ff: nn.Module, context: SVDQPatchContext | None = None, **kwargs):
+        """Replace feed-forward linears with SVDQ modules.
+
+        Args:
+            ff: Source Diffusers feed-forward module.
+            context: Shared SVDQ patch settings.
+            **kwargs: Additional SVDQ constructor overrides.
+
+        Returns:
+            None.
+        """
+
         super().__init__()
         self.net = patch_svdq_linears(ff.net, context, **kwargs)
         if len(self.net) > 2 and isinstance(self.net[2], SVDQW4A4Linear):
             self.net[2].act_unsigned = self.net[2].precision != "nvfp4"
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Run the feed-forward network.
+
+        Args:
+            hidden_states: Input tensor.
+
+        Returns:
+            Feed-forward output, using the fused MLP path when the module
+            layout supports it.
+        """
+
         if (
             len(self.net) > 2
             and isinstance(self.net[0], GELU)
@@ -342,6 +582,8 @@ class LiteFluxFeedForward(nn.Module):
 
 
 class LiteFluxTransformerBlock(nn.Module):
+    """Lite replacement for Flux double-stream transformer blocks."""
+
     def __init__(
         self,
         block: FluxTransformerBlock,
@@ -349,6 +591,18 @@ class LiteFluxTransformerBlock(nn.Module):
         context: SVDQPatchContext | None = None,
         **kwargs,
     ):
+        """Replace double-stream attention, modulation, and feed-forward projections.
+
+        Args:
+            block: Source Diffusers Flux double-stream block.
+            scale_shift: Scale offset used by Flux Schnell checkpoints.
+            context: Shared SVDQ patch settings.
+            **kwargs: Additional SVDQ constructor overrides.
+
+        Returns:
+            None.
+        """
+
         super().__init__()
         torch_dtype = context.torch_dtype if context is not None else kwargs.get("torch_dtype", torch.bfloat16)
         self.norm1 = LiteAdaLayerNormZero(block.norm1, scale_shift=scale_shift, torch_dtype=torch_dtype)
@@ -369,6 +623,20 @@ class LiteFluxTransformerBlock(nn.Module):
         image_rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
         joint_attention_kwargs: dict[str, Any] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run one Flux double-stream block over image and text states.
+
+        Args:
+            hidden_states: Image hidden states.
+            encoder_hidden_states: Text/context hidden states.
+            temb: Timestep embedding used for modulation.
+            image_rotary_emb: Diffusers rotary tensor for the joint sequence.
+            joint_attention_kwargs: Optional attention kwargs, including
+                IP-Adapter data.
+
+        Returns:
+            Tuple ``(encoder_hidden_states, hidden_states)`` after the block.
+        """
+
         norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(hidden_states, emb=temb)
         norm_encoder_hidden_states, c_gate_msa, c_shift_mlp, c_scale_mlp, c_gate_mlp = self.norm1_context(
             encoder_hidden_states, emb=temb
@@ -408,6 +676,8 @@ class LiteFluxTransformerBlock(nn.Module):
 
 
 class LiteFluxSingleTransformerBlock(nn.Module):
+    """Lite replacement for Flux single-stream transformer blocks."""
+
     def __init__(
         self,
         block: FluxSingleTransformerBlock,
@@ -415,6 +685,18 @@ class LiteFluxSingleTransformerBlock(nn.Module):
         context: SVDQPatchContext | None = None,
         **kwargs,
     ):
+        """Replace single-stream attention and MLP projections with SVDQ modules.
+
+        Args:
+            block: Source Diffusers Flux single-stream block.
+            scale_shift: Scale offset used by Flux Schnell checkpoints.
+            context: Shared SVDQ patch settings.
+            **kwargs: Additional SVDQ constructor overrides.
+
+        Returns:
+            None.
+        """
+
         super().__init__()
         torch_dtype = context.torch_dtype if context is not None else kwargs.get("torch_dtype", torch.bfloat16)
         self.mlp_hidden_dim = block.mlp_hidden_dim
@@ -434,6 +716,20 @@ class LiteFluxSingleTransformerBlock(nn.Module):
         image_rotary_emb: tuple[torch.Tensor, torch.Tensor] | torch.Tensor | None = None,
         joint_attention_kwargs: dict[str, Any] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run one Flux single-stream block over concatenated text and image states.
+
+        Args:
+            hidden_states: Image hidden states.
+            encoder_hidden_states: Text/context hidden states.
+            temb: Timestep embedding used for modulation.
+            image_rotary_emb: Diffusers rotary tensor for the joint sequence.
+            joint_attention_kwargs: Optional attention kwargs.
+
+        Returns:
+            Tuple ``(encoder_hidden_states, hidden_states)`` after splitting the
+            joint sequence back into text and image streams.
+        """
+
         text_seq_len = encoder_hidden_states.shape[1]
         image_seq_len = hidden_states.shape[1]
         packed_rotary = prepare_flux_rotary(image_rotary_emb, text_seq_len, image_seq_len)
@@ -459,9 +755,20 @@ class LiteFluxSingleTransformerBlock(nn.Module):
 
 
 class FluxAdapter:
+    """Adapter for Diffusers ``FluxTransformer2DModel`` checkpoints."""
+
     target = "flux"
 
     def matches(self, transformer: torch.nn.Module) -> bool:
+        """Return whether ``transformer`` is a Diffusers Flux transformer.
+
+        Args:
+            transformer: Candidate module.
+
+        Returns:
+            ``True`` when the class name and module path match Diffusers Flux.
+        """
+
         return (
             transformer.__class__.__name__ == "FluxTransformer2DModel"
             and "transformer_flux" in transformer.__class__.__module__
@@ -474,6 +781,19 @@ class FluxAdapter:
         quantization_config: dict[str, Any],
         options: PatchOptions,
     ) -> dict[str, torch.Tensor]:
+        """Patch a Flux transformer in place and normalize checkpoint keys.
+
+        Args:
+            transformer: Diffusers Flux transformer to mutate.
+            checkpoint_state: Checkpoint tensors to normalize for lite module
+                names.
+            quantization_config: Quantization metadata from the checkpoint.
+            options: Normalized patch options.
+
+        Returns:
+            Normalized checkpoint state dict to load into the patched model.
+        """
+
         context = build_svdq_context(transformer, quantization_config, options)
         prepare_transformer_dtype(transformer, context)
         axes_dim = tuple(getattr(transformer.pos_embed, "axes_dim", transformer.config.axes_dims_rope))
@@ -492,6 +812,16 @@ class FluxAdapter:
 
 
 def convert_flux_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Normalize Flux checkpoint key names to match lite module names.
+
+    Args:
+        state_dict: Raw checkpoint state dict.
+
+    Returns:
+        New state dict with projection, smooth-factor, and low-rank key names
+        rewritten to match the lite module tree.
+    """
+
     new_state_dict = {}
     for key, value in state_dict.items():
         new_key = key

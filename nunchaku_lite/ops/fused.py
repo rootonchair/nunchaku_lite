@@ -1,3 +1,5 @@
+"""Higher-level fused operations assembled from native quantization and GEMM kernels."""
+
 import torch
 from diffusers.models.normalization import RMSNorm as DiffusersRMSNorm
 from torch.nn import RMSNorm
@@ -8,6 +10,18 @@ from .gemm import svdq_gemm_w4a4_cuda
 
 
 def fused_gelu_mlp(x: torch.Tensor, fc1: SVDQW4A4Linear, fc2: SVDQW4A4Linear, pad_size: int = 256) -> torch.Tensor:
+    """Run a two-layer GELU MLP while keeping the intermediate activation quantized.
+
+    Args:
+        x: Input tensor with shape ``(batch, sequence, channels)``.
+        fc1: First quantized linear projection, wrapped by Diffusers GELU.
+        fc2: Second quantized linear projection.
+        pad_size: Token padding multiple for the intermediate quantized buffer.
+
+    Returns:
+        MLP output with shape ``(batch, sequence, fc2.out_features)``.
+    """
+
     batch_size, seq_len, channels = x.shape
     x = x.view(batch_size * seq_len, channels)
     quantized_x, ascales, lora_act = fc1.quantize(x)
@@ -51,6 +65,25 @@ def fused_qkv_norm_rotary(
     output: torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     attn_tokens: int = 0,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run QKV projection with fused Q/K normalization and packed RoPE.
+
+    Args:
+        x: Input tensor with shape ``(batch, sequence, channels)``.
+        proj: Fused SVDQ QKV projection module.
+        norm_q: Optional query RMSNorm module.
+        norm_k: Optional key RMSNorm module.
+        rotary_emb: Optional packed rotary embedding consumed by the native
+            GEMM kernel.
+        output: Optional dense output buffer, or a tuple of preallocated
+            ``(query, key, value)`` tensors for packed attention.
+        attn_tokens: Number of unpadded tokens when ``output`` is a Q/K/V
+            tuple.
+
+    Returns:
+        Dense fused QKV tensor when ``output`` is not a tuple, otherwise the
+        populated ``(query, key, value)`` tuple.
+    """
+
     batch_size, seq_len, channels = x.shape
     x = x.view(batch_size * seq_len, channels)
     quantized_x, ascales, lora_act = proj.quantize(x)

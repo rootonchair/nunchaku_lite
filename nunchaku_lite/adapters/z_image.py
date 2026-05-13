@@ -1,3 +1,5 @@
+"""Z-Image adapter for patching Diffusers transformers with Nunchaku Lite modules."""
+
 from typing import Any
 
 import torch
@@ -11,8 +13,7 @@ from diffusers.models.transformers.transformer_z_image import ZSingleStreamAttnP
 
 from ..core import PatchOptions, register_adapter
 from ..models.linear import SVDQW4A4Linear
-from ..ops.gemm import svdq_gemm_w4a4_cuda
-from ..ops.quantize import svdq_quantize_w4a4_act_fuse_lora_cuda
+from ..ops.fused import fused_qkv_norm_rotary
 from .common import (
     SVDQPatchContext,
     build_svdq_context,
@@ -26,69 +27,29 @@ from .common import (
 )
 
 
-class ZImageRopeHook:
-    def __init__(self):
-        self.packed_cache = {}
+def _pack_z_image_rotary_emb(freqs_cis: torch.Tensor) -> torch.Tensor:
+    """Convert Diffusers complex Z-Image RoPE tensors into Nunchaku's packed layout.
 
-    def __call__(self, module: nn.Module, input_args: tuple, input_kwargs: dict):
-        freqs_cis = input_kwargs.get("freqs_cis")
-        if freqs_cis is None:
-            return None
-        cache_key = freqs_cis.data_ptr()
-        packed_freqs_cis = self.packed_cache.get(cache_key)
-        if packed_freqs_cis is None:
-            packed_freqs_cis = torch.view_as_real(freqs_cis).unsqueeze(3)
-            packed_freqs_cis = torch.flip(packed_freqs_cis, dims=[-1])
-            packed_freqs_cis = pack_rotemb(pad_tensor(packed_freqs_cis, 256, 1))
-            self.packed_cache[cache_key] = packed_freqs_cis
-        new_input_kwargs = input_kwargs.copy()
-        new_input_kwargs["freqs_cis"] = packed_freqs_cis
-        return input_args, new_input_kwargs
+    Args:
+        freqs_cis: Complex64 rotary tensor produced by Diffusers Z-Image,
+            typically shaped ``(batch, sequence, dim // 2)``.
 
+    Returns:
+        Float32 packed rotary tensor accepted by the fused SVDQ GEMM kernels.
+    """
 
-class ZImageFusedModule(nn.Module):
-    def __init__(self, qkv: SVDQW4A4Linear, norm_q: nn.Module, norm_k: nn.Module):
-        super().__init__()
-        for name, param in qkv.named_parameters(prefix="qkv_"):
-            setattr(self, name.replace(".", ""), param)
-        self.qkv_precision = qkv.precision
-        self.qkv_out_features = qkv.out_features
-        for name, param in norm_q.named_parameters(prefix="norm_q_"):
-            setattr(self, name.replace(".", ""), param)
-        for name, param in norm_k.named_parameters(prefix="norm_k_"):
-            setattr(self, name.replace(".", ""), param)
-
-    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor | None = None) -> torch.Tensor:
-        batch_size, seq_len, channels = x.shape
-        x = x.view(batch_size * seq_len, channels)
-        quantized_x, ascales, lora_act_out = svdq_quantize_w4a4_act_fuse_lora_cuda(
-            x,
-            lora_down=self.qkv_proj_down,
-            smooth=self.qkv_smooth_factor,
-            fp4=self.qkv_precision == "nvfp4",
-            pad_size=256,
-        )
-        output = torch.empty(batch_size * seq_len, self.qkv_out_features, dtype=x.dtype, device=x.device)
-        svdq_gemm_w4a4_cuda(
-            act=quantized_x,
-            wgt=self.qkv_qweight,
-            out=output,
-            ascales=ascales,
-            wscales=self.qkv_wscales,
-            lora_act_in=lora_act_out,
-            lora_up=self.qkv_proj_up,
-            bias=getattr(self, "qkv_bias", None),
-            fp4=self.qkv_precision == "nvfp4",
-            alpha=1.0 if self.qkv_precision == "nvfp4" else None,
-            wcscales=self.qkv_wcscales if self.qkv_precision == "nvfp4" else None,
-            norm_q=self.norm_q_weight,
-            norm_k=self.norm_k_weight,
-            rotary_emb=freqs_cis,
-        )
-        return output.view(batch_size, seq_len, -1)
+    rotemb = torch.view_as_real(freqs_cis).unsqueeze(3)
+    rotemb = torch.flip(rotemb, dims=[-1])
+    return pack_rotemb(pad_tensor(rotemb, 256, 1))
 
 
 class ZImageAttention(nn.Module):
+    """Lite replacement for Diffusers Z-Image attention.
+
+    The module preserves the Diffusers attention interface while replacing
+    dense Q/K/V and output projections with SVDQ-backed projections.
+    """
+
     def __init__(
         self,
         orig_attn: Attention,
@@ -96,6 +57,18 @@ class ZImageAttention(nn.Module):
         context: SVDQPatchContext | None = None,
         **kwargs,
     ):
+        """Copy attention metadata and replace projections with SVDQ modules.
+
+        Args:
+            orig_attn: Source Diffusers attention module.
+            processor: Processor name. Only ``"flashattn2"`` is supported.
+            context: Shared SVDQ patch settings.
+            **kwargs: Additional SVDQ constructor overrides.
+
+        Returns:
+            None.
+        """
+
         super().__init__()
         self.inner_dim = orig_attn.inner_dim
         self.query_dim = orig_attn.query_dim
@@ -124,6 +97,21 @@ class ZImageAttention(nn.Module):
         attention_mask: torch.Tensor | None = None,
         **cross_attention_kwargs,
     ) -> torch.Tensor:
+        """Dispatch attention to the installed Z-Image lite processor.
+
+        Args:
+            hidden_states: Input hidden states.
+            encoder_hidden_states: Unused cross-attention states kept for
+                Diffusers API compatibility.
+            attention_mask: Optional mask forwarded to attention dispatch.
+            **cross_attention_kwargs: Extra Diffusers attention kwargs,
+                including packed ``freqs_cis``.
+
+        Returns:
+            Attention output with the same leading dimensions as
+            ``hidden_states``.
+        """
+
         return self.processor(
             attn=self,
             hidden_states=hidden_states,
@@ -133,12 +121,26 @@ class ZImageAttention(nn.Module):
         )
 
     def set_processor(self, processor: str) -> None:
+        """Install the Z-Image attention processor.
+
+        Args:
+            processor: Processor name. Must be ``"flashattn2"``.
+
+        Raises:
+            ValueError: If ``processor`` is unsupported.
+
+        Returns:
+            None.
+        """
+
         if processor != "flashattn2":
             raise ValueError(f"Processor {processor} is not supported")
         self.processor = ZImageSingleStreamAttnProcessor()
 
 
 class ZImageSingleStreamAttnProcessor(ZSingleStreamAttnProcessor):
+    """Attention processor that consumes packed RoPE and dispatches attention."""
+
     def __call__(
         self,
         attn,
@@ -147,7 +149,22 @@ class ZImageSingleStreamAttnProcessor(ZSingleStreamAttnProcessor):
         attention_mask: torch.Tensor | None = None,
         freqs_cis: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        qkv = attn.fused_module(hidden_states, freqs_cis)
+        """Run fused QKV projection, attention, and output projection.
+
+        Args:
+            attn: :class:`ZImageAttention` module containing SVDQ projections.
+            hidden_states: Input tensor for the attention block.
+            encoder_hidden_states: Unused cross-attention states kept for API
+                compatibility.
+            attention_mask: Optional 2D or broadcasted attention mask.
+            freqs_cis: Packed rotary embedding tensor installed by the forward
+                wrapper.
+
+        Returns:
+            Projected attention output.
+        """
+
+        qkv = fused_qkv_norm_rotary(hidden_states, attn.to_qkv, attn.norm_q, attn.norm_k, rotary_emb=freqs_cis)
         query, key, value = qkv.chunk(3, dim=-1)
         query = query.unflatten(-1, (attn.heads, -1))
         key = key.unflatten(-1, (attn.heads, -1))
@@ -176,6 +193,21 @@ class ZImageSingleStreamAttnProcessor(ZSingleStreamAttnProcessor):
 
 
 def _convert_z_image_ff(z_ff: DiffusersZImageFeedForward) -> FeedForward:
+    """Convert Z-Image's custom SwiGLU feed-forward module.
+
+    Args:
+        z_ff: Diffusers Z-Image feed-forward module, or an already converted
+            module.
+
+    Returns:
+        Standard Diffusers :class:`FeedForward` with equivalent dimensions, or
+        ``z_ff`` unchanged when it is not a Z-Image feed-forward module.
+
+    Raises:
+        ValueError: If the custom feed-forward projections have unexpected
+            incompatible shapes.
+    """
+
     if not isinstance(z_ff, DiffusersZImageFeedForward):
         return z_ff
     if z_ff.w1.in_features != z_ff.w3.in_features or z_ff.w1.out_features != z_ff.w3.out_features:
@@ -192,27 +224,54 @@ def _convert_z_image_ff(z_ff: DiffusersZImageFeedForward) -> FeedForward:
 
 
 class LiteZImageFeedForward(nn.Module):
+    """Quantized Z-Image feed-forward wrapper built from standard Diffusers layers."""
+
     def __init__(self, ff: DiffusersZImageFeedForward, context: SVDQPatchContext | None = None, **kwargs):
+        """Convert the feed-forward block and replace linears with SVDQ modules.
+
+        Args:
+            ff: Source Z-Image feed-forward module.
+            context: Shared SVDQ patch settings.
+            **kwargs: Additional SVDQ constructor overrides.
+
+        Returns:
+            None.
+        """
+
         super().__init__()
         self.net = patch_svdq_linears(_convert_z_image_ff(ff).net, context, **kwargs)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Apply the quantized Z-Image feed-forward network.
+
+        Args:
+            hidden_states: Input tensor.
+
+        Returns:
+            Feed-forward output tensor.
+        """
+
         for module in self.net:
             hidden_states = module(hidden_states)
         return hidden_states
 
 
-def replace_fused_module(module, incompatible_keys) -> None:
-    module.fused_module = ZImageFusedModule(module.to_qkv, module.norm_q, module.norm_k)
-    del module.to_qkv
-    del module.norm_q
-    del module.norm_k
-
-
 class ZImageAdapter:
+    """Adapter for Diffusers ``ZImageTransformer2DModel`` checkpoints."""
+
     target = "z_image"
 
     def matches(self, transformer: torch.nn.Module) -> bool:
+        """Return whether ``transformer`` is a Diffusers Z-Image transformer.
+
+        Args:
+            transformer: Candidate module.
+
+        Returns:
+            ``True`` when the class name and module path match Diffusers
+            Z-Image.
+        """
+
         return (
             transformer.__class__.__name__ == "ZImageTransformer2DModel"
             and "transformer_z_image" in transformer.__class__.__module__
@@ -225,6 +284,19 @@ class ZImageAdapter:
         quantization_config: dict[str, Any],
         options: PatchOptions,
     ) -> dict[str, torch.Tensor]:
+        """Patch a Z-Image transformer in place and install packed-RoPE handling.
+
+        Args:
+            transformer: Diffusers Z-Image transformer to mutate.
+            checkpoint_state: Checkpoint tensors to normalize for the patched
+                module names.
+            quantization_config: Quantization metadata from the checkpoint.
+            options: Normalized patch options.
+
+        Returns:
+            The checkpoint state dict to load into the patched transformer.
+        """
+
         context = build_svdq_context(transformer, quantization_config, options)
         skip_refiners = bool(
             options.adapter_options.get("skip_refiners", quantization_config.get("skip_refiners", False))
@@ -245,22 +317,62 @@ class ZImageAdapter:
         return checkpoint_state
 
     def _patch_transformer_blocks(self, block_list: list[ZImageTransformerBlock], context: SVDQPatchContext) -> None:
+        """Replace attention and feed-forward modules for Z-Image blocks.
+
+        Args:
+            block_list: Mutable list of Z-Image transformer blocks.
+            context: Shared SVDQ patch settings.
+
+        Returns:
+            None.
+        """
+
         for block in block_list:
             block.attention = ZImageAttention(block.attention, context=context)
-            block.attention.register_load_state_dict_post_hook(replace_fused_module)
             block.feed_forward = LiteZImageFeedForward(block.feed_forward, context=context)
 
     def _convert_feed_forward(self, block_list: list[ZImageTransformerBlock]) -> None:
+        """Convert unquantized refiner feed-forward blocks.
+
+        Args:
+            block_list: Mutable list of Z-Image transformer blocks whose
+                feed-forward modules should remain dense but use standard
+                Diffusers ``FeedForward`` modules.
+
+        Returns:
+            None.
+        """
+
         for block in block_list:
             block.feed_forward = _convert_z_image_ff(block.feed_forward)
 
     def _install_rope_forward_wrapper(self, transformer: torch.nn.Module) -> None:
+        """Wrap transformer forward to pack Z-Image RoPE once per forward call.
+
+        Args:
+            transformer: Patched Z-Image transformer whose attention modules
+                expect packed rotary embeddings.
+
+        Returns:
+            None.
+        """
+
         if getattr(transformer, "_nunchaku_lite_rope_wrapped", False):
             return
 
         original_forward = transformer.forward
 
-        def register_rope_hook(rope_hook: ZImageRopeHook):
+        def register_rope_hook(rope_hook):
+            """Register a pre-hook on all quantized attention modules.
+
+            Args:
+                rope_hook: Callable forward pre-hook that rewrites
+                    ``freqs_cis`` in keyword arguments.
+
+            Returns:
+                Hook handles that must be removed after forward completes.
+            """
+
             handles = []
             for layer in transformer.layers:
                 handles.append(layer.attention.register_forward_pre_hook(rope_hook, with_kwargs=True))
@@ -272,7 +384,46 @@ class ZImageAdapter:
             return handles
 
         def forward_with_packed_rope(*args, **kwargs):
-            rope_hook = ZImageRopeHook()
+            """Run the original forward with a per-call packed-RoPE cache.
+
+            Args:
+                *args: Positional arguments for the original transformer
+                    forward.
+                **kwargs: Keyword arguments for the original transformer
+                    forward.
+
+            Returns:
+                Whatever the original transformer forward returns.
+            """
+
+            packed_cache = {}
+
+            def rope_hook(module: nn.Module, input_args: tuple, input_kwargs: dict):
+                """Replace a complex ``freqs_cis`` kwarg with a packed tensor.
+
+                Args:
+                    module: Attention module receiving the hook.
+                    input_args: Positional inputs received by the module.
+                    input_kwargs: Keyword inputs received by the module.
+
+                Returns:
+                    ``None`` when no ``freqs_cis`` is present, otherwise the
+                    rewritten ``(input_args, input_kwargs)`` tuple expected by
+                    PyTorch forward pre-hooks.
+                """
+
+                freqs_cis = input_kwargs.get("freqs_cis")
+                if freqs_cis is None:
+                    return None
+                cache_key = freqs_cis.data_ptr()
+                packed_freqs_cis = packed_cache.get(cache_key)
+                if packed_freqs_cis is None:
+                    packed_freqs_cis = _pack_z_image_rotary_emb(freqs_cis)
+                    packed_cache[cache_key] = packed_freqs_cis
+                new_input_kwargs = input_kwargs.copy()
+                new_input_kwargs["freqs_cis"] = packed_freqs_cis
+                return input_args, new_input_kwargs
+
             handles = register_rope_hook(rope_hook)
             try:
                 return original_forward(*args, **kwargs)

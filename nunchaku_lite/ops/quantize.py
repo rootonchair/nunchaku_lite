@@ -1,9 +1,17 @@
+"""Activation quantization wrappers exposed by the native extension."""
+
 import torch
 
 from ..utils import ceil_divide
 
 
 def _ops():
+    """Import native ops lazily.
+
+    Returns:
+        Native extension ``ops`` namespace.
+    """
+
     from nunchaku_lite._C import ops
 
     return ops
@@ -20,6 +28,27 @@ def svdq_quantize_w4a4_act_fuse_lora_cuda(
     fp4: bool = False,
     pad_size: int = 256,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Quantize W4A4 activations and optionally fuse smooth and LoRA-down paths.
+
+    Args:
+        input: Flattened activation tensor with shape ``(tokens, channels)``.
+        output: Optional preallocated quantized activation buffer.
+        oscales: Optional preallocated activation-scale buffer.
+        lora_down: Low-rank down-projection used to compute side activations.
+        lora_act_out: Optional preallocated low-rank activation output.
+        smooth: Optional smooth factor applied during quantization.
+        fuse_glu: Whether the native quantizer should fuse GLU handling.
+        fp4: Whether to use the NVFP4 activation scale layout.
+        pad_size: Token padding multiple required by the kernel.
+
+    Returns:
+        Tuple of ``(quantized_output, output_scales, lora_activation_output)``.
+
+    Raises:
+        ValueError: If channel dimensions are incompatible with the selected
+            precision layout.
+    """
+
     batch_size, channels = input.shape
     rank = lora_down.shape[1]
     batch_size_pad = ceil_divide(batch_size, pad_size) * pad_size

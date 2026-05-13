@@ -56,7 +56,9 @@ def test_patch_transformer_patches_z_image_from_synthetic_checkpoint(tmp_path):
     assert transformer._nunchaku_lite_target == "z_image"
     assert transformer._nunchaku_lite_rope_wrapped
     assert transformer.layers[0].attention.__class__.__name__ == "ZImageAttention"
-    assert hasattr(transformer.layers[0].attention, "fused_module")
+    assert hasattr(transformer.layers[0].attention, "to_qkv")
+    assert hasattr(transformer.layers[0].attention, "norm_q")
+    assert hasattr(transformer.layers[0].attention, "norm_k")
     assert transformer.layers[0].feed_forward.__class__.__name__ == "LiteZImageFeedForward"
 
 
