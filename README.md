@@ -230,6 +230,53 @@ register_adapter(MyAdapter())
 
 Model-specific code should stay inside adapters. Pipeline construction, scheduling, prompting, and image generation should remain standard Diffusers code.
 
+### Adding a New Model Adapter
+
+New models should be added as small adapter modules under `nunchaku_lite/adapters/`. The adapter should reuse the shared SVDQ helpers in `nunchaku_lite.adapters.common` for common quantization mechanics, and keep only model topology and forward-pass differences in the model-specific file.
+
+Recommended structure:
+
+```python
+from nunchaku_lite import register_adapter
+from nunchaku_lite.adapters.common import (
+    build_svdq_context,
+    finalize_svdq_checkpoint,
+    prepare_transformer_dtype,
+    svdq_from_linear,
+)
+
+
+class MyModelAdapter:
+    target = "my_model"
+
+    def matches(self, transformer):
+        return transformer.__class__.__name__ == "MyTransformer"
+
+    def patch(self, transformer, checkpoint_state, quantization_config, options):
+        context = build_svdq_context(transformer, quantization_config, options)
+        prepare_transformer_dtype(transformer, context)
+
+        # Replace or wrap the model-specific modules here.
+        transformer.block.attn.to_qkv = svdq_from_linear(transformer.block.attn.to_qkv, context)
+
+        # Normalize checkpoint keys here only if this model's checkpoint layout needs it.
+        finalize_svdq_checkpoint(transformer, checkpoint_state, context)
+        return checkpoint_state
+
+
+register_adapter(MyModelAdapter())
+```
+
+Adapter responsibilities:
+
+- Use `build_svdq_context`, `svdq_from_linear`, `patch_svdq_linears`, and `finalize_svdq_checkpoint` for rank, precision, dtype, scale-key patching, and fp16 checkpoint conversion.
+- Keep graph-specific rewrites in the adapter, including QKV fusion, MLP fusion, module renaming, and any synthetic projection modules required to match checkpoint keys.
+- Keep rotary embedding preparation, packed attention paths, KV-cache behavior, and custom forward wrappers model-specific.
+- Add the adapter import in `nunchaku_lite.core._ensure_builtin_adapters()` if it should be built in.
+- Add focused tests that build a tiny Diffusers transformer, patch it from a synthetic safetensors checkpoint, and verify expected module names and state dict keys.
+
+Avoid adding a pipeline subclass for a new model unless the upstream Diffusers pipeline itself requires one. The preferred integration is still `patch_transformer(pipe.transformer, checkpoint, target="...")`.
+
 ## Benchmarking
 
 The repository includes a benchmark that compares an unmodified Diffusers Z-Image pipeline with the `nunchaku_lite` patched transformer.
