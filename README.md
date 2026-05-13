@@ -2,16 +2,14 @@
   <img src="assets/logo.svg" alt="nunchaku_lite" width="640">
 </p>
 
-# nunchaku_lite
+`nunchaku_lite` is a small, plugin-oriented runtime package for applying Nunchaku v2 quantized transformer and UNet weights to existing Diffusers pipelines. It is designed to patch a pipeline's model module in place, so downstream code can keep using standard Diffusers pipeline classes without subclassing or importing the full `nunchaku` package.
 
-`nunchaku_lite` is a small, plugin-oriented runtime package for applying Nunchaku v2 quantized transformer weights to existing Diffusers pipelines. It is designed to patch a pipeline's transformer module in place, so downstream code can keep using standard Diffusers pipeline classes without subclassing or importing the full `nunchaku` package.
-
-The first built-in adapters target Flux, Flux2, Qwen-Image, and Z-Image transformer classes with SVDQ W4A4 checkpoints.
+The first built-in adapters target Flux, Flux2, Qwen-Image, and Z-Image transformer classes plus SDXL UNet with SVDQ W4A4 checkpoints.
 
 ## Design Goals
 
 - Keep the public integration surface model-agnostic.
-- Patch existing `torch.nn.Module` transformer instances in place.
+- Patch existing `torch.nn.Module` model instances in place.
 - Use a registry of small adapters for model-specific graph rewrites.
 - Package only the native kernels and Python code required for the lite runtime.
 - Avoid a hard dependency on the original `nunchaku` Python package.
@@ -25,6 +23,7 @@ This package is an early lite runtime. The current built-in adapter set is:
 | `flux` | Diffusers `FluxTransformer2DModel` | Implemented |
 | `flux2` | Diffusers `Flux2Transformer2DModel` | Implemented |
 | `qwen_image` | Diffusers `QwenImageTransformer2DModel` | Implemented |
+| `sdxl` | Diffusers `UNet2DConditionModel` | Implemented |
 | `z_image` | Diffusers `ZImageTransformer2DModel` | Implemented |
 
 Additional model families should be added through the common adapter registry rather than through pipeline-specific subclasses.
@@ -38,7 +37,7 @@ The full `nunchaku` package in this repository exposes a broader set of model-sp
 - [x] Qwen-Image transformer adapter based on `NunchakuQwenImageTransformer2DModel`, covering Qwen-Image, Qwen-Image-Lightning, Qwen-Image-Edit, Qwen-Image-Edit-2509, and Qwen-Image ControlNet examples.
 - [x] Z-Image transformer adapter for Diffusers `ZImageTransformer2DModel`.
 - [ ] Sana transformer adapter based on `NunchakuSanaTransformer2DModel`, covering Sana 1.6B and Sana PAG examples.
-- [ ] SDXL UNet adapter based on `NunchakuSDXLUNet2DConditionModel`, covering SDXL and SDXL-Turbo examples.
+- [x] SDXL UNet adapter based on `NunchakuSDXLUNet2DConditionModel`, covering SDXL and SDXL-Turbo examples.
 - [ ] Quantized T5 text encoder support based on `NunchakuT5EncoderModel`.
 - [ ] FLUX LoRA conversion, loading, and composition support.
 - [ ] FLUX IP-Adapter integration.
@@ -88,6 +87,7 @@ Full quick-start scripts live under `examples/` so the main README stays focused
 | Z-Image Turbo INT4 / FP4 | [examples/z_image.md](examples/z_image.md) | Standard `patch_transformer(pipe.transformer, ...)` flow. |
 | FLUX.1-schnell INT4 / FP4 | [examples/flux.md](examples/flux.md) | Standard Flux adapter flow. |
 | FLUX.2 Klein INT4 / FP4 | [examples/flux2.md](examples/flux2.md) | Standard Flux2 adapter flow. |
+| SDXL / SDXL-Turbo INT4 | [examples/sdxl.md](examples/sdxl.md) | UNet adapter flow using `patch_transformer(pipe.unet, ...)`. |
 
 The Qwen low-VRAM examples use `enable_model_cpu_offload()`, which requires `accelerate`.
 
@@ -125,7 +125,7 @@ patch_transformer(
 
 Arguments:
 
-- `transformer`: the Diffusers transformer module to patch.
+- `transformer`: the Diffusers transformer or UNet module to patch.
 - `checkpoint`: local or Hugging Face `.safetensors` checkpoint path.
 - `target`: adapter name, or `"auto"` to select the only matching adapter.
 - `precision`: `"auto"`, `"fp4"`, or `"int4"`. Internally, `"fp4"` maps to NVFP4 kernels.

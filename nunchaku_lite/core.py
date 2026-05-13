@@ -1,4 +1,4 @@
-"""Adapter registry and public transformer patching entry points."""
+"""Adapter registry and public model patching entry points."""
 
 import importlib
 import json
@@ -104,7 +104,7 @@ def list_adapters() -> list[str]:
     """Return the sorted list of registered adapter target names.
 
     Built-in adapters are imported before the list is returned so callers see
-    the default Flux, Flux2, Qwen-Image, and Z-Image registrations.
+    the default Flux, Flux2, Qwen-Image, SDXL, and Z-Image registrations.
 
     Returns:
         Sorted adapter target names.
@@ -283,5 +283,6 @@ def _ensure_builtin_adapters() -> None:
     importlib.import_module("nunchaku_lite.adapters.flux")
     importlib.import_module("nunchaku_lite.adapters.flux2")
     importlib.import_module("nunchaku_lite.adapters.qwen_image")
+    importlib.import_module("nunchaku_lite.adapters.sdxl")
     importlib.import_module("nunchaku_lite.adapters.z_image")
     _BUILTINS_LOADED = True

@@ -75,6 +75,6 @@
 
   <g transform="translate(300 124)">
     <text class="wordmark" x="0" y="0">nunchaku<tspan class="accent">_lite</tspan></text>
-    <text class="tagline" x="4" y="48">small adapter runtime for quantized diffusion transformers</text>
+    <text class="tagline" x="4" y="48">small adapter runtime for quantized diffusion models</text>
   </g>
 </svg>
