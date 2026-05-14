@@ -7,7 +7,8 @@ from safetensors.torch import save_file
 
 from nunchaku_lite import patch_transformer
 from nunchaku_lite.adapters.flux import FluxAdapter
-from nunchaku_lite.lora.flux import bind_flux_pipeline_lora_methods, convert_flux_lora_to_lite, unpack_lowrank_weight
+from nunchaku_lite.lora.base import bind_pipeline_lora_methods
+from nunchaku_lite.lora.flux import NunchakuFluxPipelineLoraMixin, convert_flux_lora_to_lite, unpack_lowrank_weight
 
 from test_flux_adapter import make_tiny_flux_transformer
 
@@ -233,7 +234,7 @@ def test_unsupported_flux_lora_target_raises(tmp_path):
         "transformer.transformer_blocks.0.not_a_module.lora_B.weight": torch.ones(192, 2),
     }
 
-    with pytest.raises(ValueError, match="Unsupported Flux LoRA target"):
+    with pytest.raises(ValueError, match="Unsupported Nunchaku LoRA target"):
         transformer.load_lora(lora)
 
 
@@ -258,7 +259,7 @@ def test_pipeline_lora_mixin_maps_diffusers_api_to_transformer_runtime(tmp_path)
         return state_dict
 
     pipeline.lora_state_dict = MethodType(lora_state_dict, pipeline)
-    bind_flux_pipeline_lora_methods(pipeline)
+    bind_pipeline_lora_methods(pipeline, NunchakuFluxPipelineLoraMixin)
 
     pipeline.load_lora_weights(lora, adapter_name="style")
 
@@ -300,7 +301,7 @@ def test_pipeline_lora_mixin_rejects_unsupported_apis_and_text_encoder_lora(tmp_
         return state_dict
 
     pipeline.lora_state_dict = MethodType(lora_state_dict, pipeline)
-    bind_flux_pipeline_lora_methods(pipeline)
+    bind_pipeline_lora_methods(pipeline, NunchakuFluxPipelineLoraMixin)
     text_lora = {
         "text_encoder.encoder.layers.0.self_attn.q_proj.lora_A.weight": torch.ones(1, 4),
         "text_encoder.encoder.layers.0.self_attn.q_proj.lora_B.weight": torch.ones(4, 1),

@@ -13,8 +13,39 @@ from ..models.linear import AWQW4A16Linear, SVDQW4A4Linear
 from ..utils import load_state_dict_in_safetensors
 
 
-LORA_A_SUFFIX = ".lora_A.weight"
-LORA_B_SUFFIX = ".lora_B.weight"
+TRANSFORMER_LORA_METHODS = (
+    "load_lora",
+    "load_lora_adapter",
+    "set_lora_strength",
+    "set_adapters",
+    "reset_lora",
+    "delete_adapters",
+    "unload_lora",
+    "enable_lora",
+    "disable_lora",
+    "get_list_adapters",
+    "get_active_adapters",
+    "fuse_lora",
+    "_convert_lora_to_lite",
+)
+
+PIPELINE_LORA_METHODS = (
+    "load_lora_weights",
+    "load_lora_adapter",
+    "set_adapters",
+    "delete_adapters",
+    "unload_lora_weights",
+    "enable_lora",
+    "disable_lora",
+    "get_list_adapters",
+    "get_active_adapters",
+    "fuse_lora",
+    "unfuse_lora",
+    "_pipeline_transformer",
+    "_bind_transformer_lora_methods",
+)
+
+RUNTIME_LORA_LABEL = "Nunchaku LoRA"
 
 
 def bind_mixin_methods(instance, mixin_cls: type, method_names: tuple[str, ...]) -> None:
@@ -22,10 +53,27 @@ def bind_mixin_methods(instance, mixin_cls: type, method_names: tuple[str, ...])
         setattr(instance, method_name, MethodType(getattr(mixin_cls, method_name), instance))
 
 
+def bind_transformer_lora_methods(
+    transformer: nn.Module,
+    mixin_cls: type,
+) -> None:
+    bind_mixin_methods(transformer, mixin_cls, TRANSFORMER_LORA_METHODS)
+    ensure_lora_runtime(transformer)
+
+
+def bind_pipeline_lora_methods(
+    pipeline,
+    mixin_cls: type,
+    *,
+    component_name: str = "transformer",
+) -> None:
+    pipeline._nunchaku_lite_lora_component_name = component_name
+    bind_mixin_methods(pipeline, mixin_cls, PIPELINE_LORA_METHODS)
+    pipeline._nunchaku_lite_lora_pipeline_api_bound = True
+
+
 class NunchakuLoraMixin:
     """Mixin-style method provider for quantized transformer LoRA runtime."""
-
-    _nunchaku_lite_lora_model_name = "transformer"
 
     def load_lora(
         self,
@@ -46,8 +94,7 @@ class NunchakuLoraMixin:
     ) -> str:
         if hotswap:
             raise NotImplementedError(
-                f"nunchaku_lite {getattr(self, '_nunchaku_lite_lora_model_name', 'transformer')} "
-                "runtime LoRA does not support PEFT hotswap."
+                f"nunchaku_lite {RUNTIME_LORA_LABEL} runtime does not support PEFT hotswap."
             )
         adapter_name = kwargs.pop("adapter_name", None)
         network_alphas = kwargs.pop("network_alphas", None)
@@ -57,7 +104,7 @@ class NunchakuLoraMixin:
         state_dict = strip_component_prefixes(dict(pretrained_model_name_or_path_or_dict), prefix=prefix)
         if network_alphas:
             state_dict.update(network_alphas)
-        raise_if_text_encoder_lora(state_dict, getattr(self, "_nunchaku_lite_lora_model_name", "transformer"))
+        raise_if_text_encoder_lora(state_dict)
         return self.load_lora(state_dict, name=adapter_name)
 
     def set_lora_strength(self, strength: float = 1.0, name: str | None = None) -> None:
@@ -97,8 +144,7 @@ class NunchakuLoraMixin:
 
     def fuse_lora(self, *args, **kwargs) -> None:
         raise NotImplementedError(
-            f"nunchaku_lite {getattr(self, '_nunchaku_lite_lora_model_name', 'transformer')} "
-            "runtime LoRA keeps adapters as low-rank branches."
+            f"nunchaku_lite {RUNTIME_LORA_LABEL} runtime keeps adapters as low-rank branches."
         )
 
     def _convert_lora_to_lite(
@@ -111,7 +157,6 @@ class NunchakuLoraMixin:
 class NunchakuPipelineLoraMixin:
     """Mixin-style provider for Diffusers-compatible pipeline LoRA APIs."""
 
-    _nunchaku_lite_lora_model_name = "transformer"
     _nunchaku_lite_lora_component_name = "transformer"
 
     def load_lora_weights(
@@ -123,8 +168,7 @@ class NunchakuPipelineLoraMixin:
     ) -> None:
         if hotswap:
             raise NotImplementedError(
-                f"nunchaku_lite {getattr(self, '_nunchaku_lite_lora_model_name', 'transformer')} "
-                "runtime LoRA does not support PEFT hotswap."
+                f"nunchaku_lite {RUNTIME_LORA_LABEL} runtime does not support PEFT hotswap."
             )
         transformer = self._pipeline_transformer()
         ensure_lora_runtime(transformer)
@@ -138,9 +182,8 @@ class NunchakuPipelineLoraMixin:
             state_dict, network_alphas, _metadata = result
         else:
             state_dict, network_alphas = result
-        model_name = getattr(self, "_nunchaku_lite_lora_model_name", "transformer")
         component_name = getattr(self, "_nunchaku_lite_lora_component_name", "transformer")
-        raise_if_text_encoder_lora(state_dict, model_name)
+        raise_if_text_encoder_lora(state_dict)
         transformer_state = {
             key: value
             for key, value in state_dict.items()
@@ -188,8 +231,7 @@ class NunchakuPipelineLoraMixin:
     def unload_lora_weights(self, reset_to_overwritten_params: bool = False) -> None:
         if reset_to_overwritten_params:
             raise NotImplementedError(
-                f"nunchaku_lite {getattr(self, '_nunchaku_lite_lora_model_name', 'transformer')} "
-                "runtime LoRA does not overwrite dense params."
+                f"nunchaku_lite {RUNTIME_LORA_LABEL} runtime does not overwrite dense params."
             )
         self._pipeline_transformer().unload_lora()
 
@@ -208,14 +250,12 @@ class NunchakuPipelineLoraMixin:
 
     def fuse_lora(self, *args, **kwargs) -> None:
         raise NotImplementedError(
-            f"nunchaku_lite {getattr(self, '_nunchaku_lite_lora_model_name', 'transformer')} "
-            "runtime LoRA does not support fusing into quantized weights."
+            f"nunchaku_lite {RUNTIME_LORA_LABEL} runtime does not support fusing into quantized weights."
         )
 
     def unfuse_lora(self, *args, **kwargs) -> None:
         raise NotImplementedError(
-            f"nunchaku_lite {getattr(self, '_nunchaku_lite_lora_model_name', 'transformer')} "
-            "runtime LoRA does not support fusing into quantized weights."
+            f"nunchaku_lite {RUNTIME_LORA_LABEL} runtime does not support fusing into quantized weights."
         )
 
     def _pipeline_transformer(self) -> nn.Module:
@@ -317,7 +357,7 @@ def strip_component_prefixes(state_dict: dict[str, torch.Tensor], prefix: str = 
     return stripped
 
 
-def raise_if_text_encoder_lora(state_dict: dict[str, torch.Tensor], model_name: str) -> None:
+def raise_if_text_encoder_lora(state_dict: dict[str, torch.Tensor]) -> None:
     text_keys = [
         key
         for key in state_dict
@@ -326,7 +366,7 @@ def raise_if_text_encoder_lora(state_dict: dict[str, torch.Tensor], model_name: 
     if text_keys:
         sample = ", ".join(text_keys[:5])
         raise NotImplementedError(
-            f"nunchaku_lite {model_name} runtime LoRA supports transformer LoRA weights only; "
+            f"nunchaku_lite {RUNTIME_LORA_LABEL} runtime supports transformer LoRA weights only; "
             f"text encoder LoRA keys are not supported: {sample}"
         )
 
@@ -500,76 +540,6 @@ def lora_modules(transformer: nn.Module) -> dict[str, SVDQW4A4Linear | AWQW4A16L
     modules.update(svdq_modules(transformer))
     modules.update(awq_modules(transformer))
     return modules
-
-
-def normalize_float_tensor(value: torch.Tensor) -> torch.Tensor:
-    if value.dtype in (torch.float64, torch.float32, torch.bfloat16, torch.float16):
-        return value
-    return value.to(torch.bfloat16)
-
-
-def extract_network_alphas(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    return {key: value for key, value in state_dict.items() if key.endswith(".alpha")}
-
-
-def apply_network_alphas(
-    state_dict: dict[str, torch.Tensor],
-    alphas: dict[str, torch.Tensor],
-) -> dict[str, torch.Tensor]:
-    if not alphas:
-        return {key: value for key, value in state_dict.items() if not key.endswith(".alpha")}
-
-    converted = {key: value for key, value in state_dict.items() if not key.endswith(".alpha")}
-    for alpha_key, alpha in alphas.items():
-        base = alpha_key[: -len(".alpha")]
-        a_key = f"{base}{LORA_A_SUFFIX}"
-        b_key = f"{base}{LORA_B_SUFFIX}"
-        if a_key not in converted or b_key not in converted:
-            continue
-        rank = converted[a_key].shape[0]
-        alpha_value = float(alpha.item() if isinstance(alpha, torch.Tensor) else alpha)
-        converted[a_key] = converted[a_key] * (alpha_value / rank)
-    return converted
-
-
-def diffusers_pairs(state_dict: dict[str, torch.Tensor]) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
-    pairs = {}
-    for key, value in state_dict.items():
-        if not key.endswith(LORA_A_SUFFIX):
-            continue
-        base = key[: -len(LORA_A_SUFFIX)]
-        b_key = f"{base}{LORA_B_SUFFIX}"
-        if b_key not in state_dict:
-            raise ValueError(f"Missing LoRA B tensor for {key!r}.")
-        pairs[base] = (value, state_dict[b_key])
-    return pairs
-
-
-def validate_lite_lora_state_dict(
-    state_dict: dict[str, torch.Tensor],
-    transformer: nn.Module,
-    *,
-    model_name: str,
-) -> dict[str, torch.Tensor]:
-    modules = lora_modules(transformer)
-    if not state_dict:
-        raise ValueError(f"LoRA state dict did not contain any supported {model_name} projection tensors.")
-
-    valid = {}
-    for down_key, up_key in iter_lora_pairs(state_dict):
-        module_name = down_key[: -len(".proj_down")]
-        if module_name not in modules:
-            raise ValueError(f"LoRA target {module_name!r} does not exist on this patched {model_name} transformer.")
-        module = modules[module_name]
-        down = fit_lora_tensor(state_dict[down_key], module.in_features, down=True, module_name=module_name)
-        up = fit_lora_tensor(state_dict[up_key], module.out_features, down=False, module_name=module_name)
-        if down.shape[1] != up.shape[1]:
-            raise ValueError(
-                f"LoRA rank mismatch for {module_name}: proj_down={tuple(down.shape)}, proj_up={tuple(up.shape)}"
-            )
-        valid[down_key] = down
-        valid[up_key] = up
-    return valid
 
 
 def iter_lora_pairs(state_dict: dict[str, torch.Tensor]) -> list[tuple[str, str]]:

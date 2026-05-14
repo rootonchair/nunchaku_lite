@@ -567,11 +567,26 @@ class QwenImageAdapter:
         transformer._nunchaku_lite_qwen_image_original_forward = transformer.forward
         transformer.forward = types.MethodType(lite_qwen_image_forward, transformer)
         finalize_svdq_checkpoint(transformer, checkpoint_state, context)
-        from ..lora.qwen_image import bind_qwen_image_lora_methods
+        from ..lora.base import bind_transformer_lora_methods
+        from ..lora.qwen_image import NunchakuQwenImageLoraMixin
 
-        bind_qwen_image_lora_methods(transformer)
+        bind_transformer_lora_methods(transformer, NunchakuQwenImageLoraMixin)
         transformer._nunchaku_lite_qwen_image_patched = True
         return checkpoint_state
+
+    def patch_pipeline(
+        self,
+        pipeline: Any,
+        *,
+        component_name: str = "transformer",
+        component: torch.nn.Module | None = None,
+    ) -> None:
+        """Attach Qwen-Image pipeline-level runtime APIs."""
+
+        from ..lora.base import bind_pipeline_lora_methods
+        from ..lora.qwen_image import NunchakuQwenImagePipelineLoraMixin
+
+        bind_pipeline_lora_methods(pipeline, NunchakuQwenImagePipelineLoraMixin)
 
     def _patch_transformer(self, transformer: torch.nn.Module, context: SVDQPatchContext) -> None:
         """Patch Qwen transformer blocks through one recursive traversal.

@@ -804,10 +804,25 @@ class FluxAdapter:
         checkpoint_state = convert_flux_state_dict(checkpoint_state)
         finalize_svdq_checkpoint(transformer, checkpoint_state, context)
         transformer._nunchaku_lite_flux_patched = True
-        from ..lora.flux import bind_flux_lora_methods
+        from ..lora.base import bind_transformer_lora_methods
+        from ..lora.flux import NunchakuFluxTransformerLoraMixin
 
-        bind_flux_lora_methods(transformer)
+        bind_transformer_lora_methods(transformer, NunchakuFluxTransformerLoraMixin)
         return checkpoint_state
+
+    def patch_pipeline(
+        self,
+        pipeline: Any,
+        *,
+        component_name: str = "transformer",
+        component: torch.nn.Module | None = None,
+    ) -> None:
+        """Attach Flux pipeline-level runtime APIs."""
+
+        from ..lora.base import bind_pipeline_lora_methods
+        from ..lora.flux import NunchakuFluxPipelineLoraMixin
+
+        bind_pipeline_lora_methods(pipeline, NunchakuFluxPipelineLoraMixin)
 
     def _patch_transformer(self, transformer: torch.nn.Module, context: SVDQPatchContext) -> None:
         """Patch Flux block modules through one recursive transformer traversal.

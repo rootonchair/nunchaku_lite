@@ -227,8 +227,8 @@ def test_patch_modules_recursively_replaces_attention_subclasses_with_converter(
     module = Wrapper()
     report = patch_modules_recursively(
         module,
-        custom_attention_converters={CustomAttention: lambda _attention: NunchakuCustomAttention()},
+        module_converters={CustomAttention: lambda _attention: NunchakuCustomAttention()},
     )
 
-    assert report.custom_attention_modules == 1
+    assert report.converted_modules == 1
     assert isinstance(module.attention, NunchakuCustomAttention)

@@ -41,7 +41,8 @@ class TransformerAdapter(Protocol):
     """Protocol implemented by model-specific in-place transformer adapters.
 
     Adapters own all model-topology details. The core registry only selects an
-    adapter, loads checkpoint tensors, and delegates the module rewrite.
+    adapter, loads checkpoint tensors, and delegates the module rewrite. Adapters
+    may also provide ``patch_pipeline`` to attach pipeline-level runtime APIs.
     """
 
     target: str
@@ -179,7 +180,6 @@ def load_nunchaku_pipeline(
     device: str | torch.device | None = None,
     strict: bool = True,
     adapter_options: dict[str, Any] | None = None,
-    bind_lora: bool = True,
     **pipeline_kwargs,
 ):
     """Load a Diffusers pipeline with its Nunchaku component installed up front.
@@ -204,7 +204,6 @@ def load_nunchaku_pipeline(
         device: Optional device to move the patched component to after loading.
         strict: Whether checkpoint loading should require exact key matching.
         adapter_options: Optional adapter-specific patch settings.
-        bind_lora: Whether to bind supported pipeline-level LoRA APIs.
         **pipeline_kwargs: Additional keyword arguments forwarded to
             ``pipeline_cls.from_pretrained``.
 
@@ -214,6 +213,8 @@ def load_nunchaku_pipeline(
 
     if not hasattr(pipeline_cls, "from_pretrained"):
         raise TypeError("pipeline_cls must provide a from_pretrained classmethod.")
+    if "bind_lora" in pipeline_kwargs:
+        raise TypeError("load_nunchaku_pipeline() got an unexpected keyword argument 'bind_lora'.")
 
     pipeline_config = _load_pipeline_config(pipeline_cls, pretrained_model_name_or_path, pipeline_kwargs)
     component_name = _select_pipeline_component(pipeline_cls, pipeline_config, component)
@@ -245,8 +246,10 @@ def load_nunchaku_pipeline(
         **pipeline_kwargs,
         **{component_name: loaded_component},
     )
-    if bind_lora:
-        _bind_pipeline_runtime_methods(pipe, getattr(loaded_component, "_nunchaku_lite_target", target))
+    adapter = getattr(loaded_component, "_nunchaku_lite_adapter", None)
+    patch_pipeline = getattr(adapter, "patch_pipeline", None)
+    if patch_pipeline is not None:
+        patch_pipeline(pipe, component_name=component_name, component=loaded_component)
     return pipe
 
 
@@ -296,6 +299,7 @@ def _patch_component(
 
     transformer._nunchaku_lite_patched = True
     transformer._nunchaku_lite_target = adapter.target
+    transformer._nunchaku_lite_adapter = adapter
     transformer._nunchaku_lite_quantization_config = quantization_config
     transformer._nunchaku_lite_incompatible_keys = incompatible
     return transformer
@@ -428,17 +432,6 @@ def _load_nunchaku_component_from_config(
 
 def _extract_config_loading_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in kwargs.items() if key in _CONFIG_LOADING_KWARGS}
-
-
-def _bind_pipeline_runtime_methods(pipeline: Any, target: str) -> None:
-    if target == "flux":
-        from .lora import bind_flux_pipeline_lora_methods
-
-        bind_flux_pipeline_lora_methods(pipeline)
-    elif target == "qwen_image":
-        from .lora import bind_qwen_image_pipeline_lora_methods
-
-        bind_qwen_image_pipeline_lora_methods(pipeline)
 
 
 def _materialize_known_meta_tensors(module: torch.nn.Module) -> None:

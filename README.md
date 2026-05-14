@@ -41,7 +41,7 @@ The full `nunchaku` package in this repository exposes a broader set of model-sp
 - [x] SDXL UNet adapter based on `NunchakuSDXLUNet2DConditionModel`, covering SDXL and SDXL-Turbo examples.
 - [ ] Quantized T5 text encoder support based on `NunchakuT5EncoderModel`.
 - [x] FLUX runtime LoRA support, including Diffusers-format conversion, Nunchaku-format loading, strength control, reset, and multi-LoRA composition.
-- [x] Qwen-Image runtime LoRA support, covering Qwen-Image and Qwen-Image-Edit families after LoRA key mapping is defined.
+- [x] Qwen-Image runtime LoRA support, covering Qwen-Image and Qwen-Image-Edit families.
 - [ ] Flux2 runtime LoRA support, reusing FLUX conversion patterns where compatible.
 - [ ] SDXL runtime LoRA support for quantized UNet attention and MLP projections.
 - [ ] Z-Image runtime LoRA support for quantized transformer projections.
@@ -128,7 +128,7 @@ pipe = load_nunchaku_pipeline(
 )
 ```
 
-`load_nunchaku_pipeline` is the preferred public API. It reads the pipeline config, constructs the selected `transformer` or `unet` on the meta device, patches it with the Nunchaku adapter, loads the quantized checkpoint with `assign=True`, and passes the patched component into `pipeline_cls.from_pretrained(...)`. Diffusers then loads the rest of the pipeline normally while skipping the original dense component.
+`load_nunchaku_pipeline` is the preferred public API. It reads the pipeline config, constructs the selected `transformer` or `unet` on the meta device, patches it with the Nunchaku adapter, loads the quantized checkpoint with `assign=True`, and passes the patched component into `pipeline_cls.from_pretrained(...)`. Diffusers then loads the rest of the pipeline normally while skipping the original dense component. Adapters that provide pipeline runtime APIs patch the loaded pipeline automatically.
 
 Arguments:
 
@@ -138,7 +138,6 @@ Arguments:
 - `target`: adapter name, or `"auto"` to select the only matching adapter.
 - `component`: optional `"transformer"` or `"unet"` override. Auto-selection prefers `transformer`, then `unet`.
 - `precision`, `torch_dtype`, `device`, `strict`, and `adapter_options`: same patching controls as `patch_transformer`.
-- `bind_lora`: binds supported pipeline-level runtime APIs. FLUX LoRA APIs are bound by default.
 - additional keyword arguments are forwarded to `pipeline_cls.from_pretrained(...)`.
 
 ### `patch_transformer`
@@ -171,7 +170,7 @@ This is the low-level compatibility API for callers that already constructed a c
 
 ### Runtime LoRA
 
-Patched FLUX and Qwen-Image transformers expose runtime LoRA methods:
+Pipelines loaded through `load_nunchaku_pipeline` expose Diffusers-style runtime LoRA methods when their adapter provides pipeline support:
 
 ```python
 pipe = load_nunchaku_pipeline(
@@ -187,9 +186,16 @@ pipe.set_adapters("artist", adapter_weights=0.5)
 pipe.unload_lora_weights()
 ```
 
-`load_lora` accepts Diffusers-format LoRAs and Nunchaku-format low-rank tensors for supported adapters. Multiple LoRAs can be active at once; they are recomposed from the original checkpoint low-rank state when strengths change or one LoRA is reset.
+Runtime LoRA loading accepts Diffusers-format LoRAs and Nunchaku-format low-rank tensors for supported adapters. Use pipeline-level `load_lora_weights` on pipelines loaded with `load_nunchaku_pipeline`, or transformer-level `load_lora` on directly patched components. Multiple LoRAs can be active at once; they are recomposed from the original checkpoint low-rank state when strengths change or one LoRA is reset.
 
-`load_nunchaku_pipeline` binds Diffusers-style pipeline LoRA methods for FLUX and Qwen-Image automatically. Advanced callers using `patch_transformer` directly can still bind those methods manually with `nunchaku_lite.lora.bind_flux_pipeline_lora_methods(pipe)` or `nunchaku_lite.lora.bind_qwen_image_pipeline_lora_methods(pipe)`.
+Advanced callers using `patch_transformer` directly can bind pipeline LoRA methods manually:
+
+```python
+from nunchaku_lite.lora.base import bind_pipeline_lora_methods
+from nunchaku_lite.lora.flux import NunchakuFluxPipelineLoraMixin
+
+bind_pipeline_lora_methods(pipe, NunchakuFluxPipelineLoraMixin)
+```
 
 ### Adapter Registry
 
@@ -205,6 +211,10 @@ class MyAdapter:
     def patch(self, transformer, checkpoint_state, quantization_config, options):
         # Rewrite modules, install hooks, or normalize checkpoint keys.
         return checkpoint_state
+
+    def patch_pipeline(self, pipeline, *, component_name="transformer", component=None):
+        # Optional: attach pipeline-level runtime APIs.
+        return None
 ```
 
 Register an adapter before calling `load_nunchaku_pipeline` or `patch_transformer`:
@@ -252,8 +262,6 @@ class MyModelAdapter:
             linear_filter=lambda path, linear: path.startswith("blocks."),
             module_converters={
                 MyFeedForwardBlock: convert_my_feed_forward_block,
-            },
-            custom_attention_converters={
                 MyAttentionSubclass: lambda attention: MyLiteAttention(attention, context=context),
             },
         )
@@ -274,9 +282,162 @@ Adapter responsibilities:
 - Add the adapter import in `nunchaku_lite.core._ensure_builtin_adapters()` if it should be built in.
 - Add focused tests that build a tiny Diffusers transformer, patch it from a synthetic safetensors checkpoint, and verify expected module names and state dict keys.
 
-`patch_modules_recursively` mutates the selected module tree in place and returns a `ModulePatchReport` with replacement and skip counts. Use `linear_filter` or narrow roots so only checkpoint-backed dense projections are replaced. Use `module_converters` for exact-class model blocks that can be normalized before descending. Use `custom_attention_converters` for Diffusers `Attention` subclasses that require a model-specific replacement; unsupported attention subclasses now raise `TypeError` instead of being silently skipped.
+`patch_modules_recursively` mutates the selected module tree in place and returns a `ModulePatchReport` with replacement and skip counts. Use `linear_filter` or narrow roots so only checkpoint-backed dense projections are replaced. Use `skip_subtree` for branches that must remain completely untouched. Use `attention_processor_factory` for exact Diffusers `Attention` children that can use the shared `NunchakuAttention` wrapper. Use `module_converters` for exact-class model blocks or Diffusers `Attention` subclasses that require a model-specific replacement; unsupported attention subclasses raise `TypeError` instead of being silently skipped.
 
 Avoid adding a pipeline subclass for a new model unless the upstream Diffusers pipeline itself requires one. The preferred integration is `load_nunchaku_pipeline(model_id, pipeline_cls=..., checkpoint=..., target="...")`.
+
+### Adding Runtime LoRA Support
+
+Runtime LoRA support for a new adapter has three parts:
+
+1. Define transformer and pipeline mixins in `nunchaku_lite/lora/<model>.py`.
+2. Add a converter from the model's Diffusers or PEFT LoRA keys into lite `.proj_down` / `.proj_up` tensors.
+3. Bind the mixins from the adapter `patch(...)` and optional `patch_pipeline(...)` methods.
+
+The transformer mixin should inherit `NunchakuLoraMixin` and implement `_convert_lora_to_lite`. The pipeline mixin should inherit `NunchakuPipelineLoraMixin` and bind the transformer mixin when the pipeline discovers an unbound component:
+
+```python
+from pathlib import Path
+
+import torch
+from torch import nn
+
+from nunchaku_lite.lora.base import (
+    NunchakuLoraMixin,
+    NunchakuPipelineLoraMixin,
+    bind_transformer_lora_methods,
+)
+
+
+class NunchakuMyModelLoraMixin(NunchakuLoraMixin):
+    def _convert_lora_to_lite(
+        self,
+        path_or_state_dict: str | Path | dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        return convert_my_model_lora_to_lite(path_or_state_dict, self)
+
+
+class NunchakuMyModelPipelineLoraMixin(NunchakuPipelineLoraMixin):
+    def _bind_transformer_lora_methods(self, transformer: nn.Module) -> None:
+        bind_transformer_lora_methods(transformer, NunchakuMyModelLoraMixin)
+```
+
+The adapter owns runtime binding. Bind transformer LoRA methods after replacing modules and normalizing checkpoint keys, then bind pipeline APIs from `patch_pipeline`:
+
+```python
+from nunchaku_lite.lora.base import bind_pipeline_lora_methods, bind_transformer_lora_methods
+from nunchaku_lite.lora.my_model import (
+    NunchakuMyModelLoraMixin,
+    NunchakuMyModelPipelineLoraMixin,
+)
+
+
+class MyModelAdapter:
+    target = "my_model"
+
+    def patch(self, transformer, checkpoint_state, quantization_config, options):
+        # Patch quantized modules and finalize checkpoint state first.
+        bind_transformer_lora_methods(transformer, NunchakuMyModelLoraMixin)
+        return checkpoint_state
+
+    def patch_pipeline(self, pipeline, *, component_name="transformer", component=None):
+        bind_pipeline_lora_methods(
+            pipeline,
+            NunchakuMyModelPipelineLoraMixin,
+            component_name=component_name,
+        )
+```
+
+For a PEFT-style LoRA where incoming keys already look like
+`transformer.blocks.0.attn.to_q.lora_A.weight` and
+`transformer.blocks.0.attn.to_q.lora_B.weight`, the model LoRA file can look
+like this:
+
+```python
+from pathlib import Path
+
+import torch
+from torch import nn
+
+from nunchaku_lite.models.linear import AWQW4A16Linear, SVDQW4A4Linear
+from nunchaku_lite.lora.base import (
+    NunchakuLoraMixin,
+    NunchakuPipelineLoraMixin,
+    bind_transformer_lora_methods,
+    load_lora_state_dict,
+)
+from nunchaku_lite.lora.conversion import (
+    FusedProjectionSpec,
+    convert_diffusers_lora_state_dict,
+    is_nunchaku_lite_lora_state_dict,
+    normalize_lite_lora_state_dict,
+    strip_transformer_prefix,
+)
+from nunchaku_lite.lora.peft import apply_network_alphas, extract_network_alphas, normalize_float_tensor
+
+
+QKV_PROJECTION_SPECS = (
+    FusedProjectionSpec(target=".attn.to_qkv", branches=(".attn.to_q", ".attn.to_k", ".attn.to_v")),
+)
+
+
+class NunchakuMyModelLoraMixin(NunchakuLoraMixin):
+    def _convert_lora_to_lite(
+        self,
+        path_or_state_dict: str | Path | dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        return convert_my_model_lora_to_lite(path_or_state_dict, self)
+
+
+class NunchakuMyModelPipelineLoraMixin(NunchakuPipelineLoraMixin):
+    def _bind_transformer_lora_methods(self, transformer: nn.Module) -> None:
+        bind_transformer_lora_methods(transformer, NunchakuMyModelLoraMixin)
+
+
+def convert_my_model_lora_to_lite(
+    state_dict_or_path: str | Path | dict[str, torch.Tensor],
+    transformer: nn.Module,
+) -> dict[str, torch.Tensor]:
+    state_dict = load_lora_state_dict(state_dict_or_path)
+    if is_nunchaku_lite_lora_state_dict(state_dict):
+        return normalize_lite_lora_state_dict(state_dict, transformer)
+    return _convert_peft_lora_state_dict(state_dict, transformer)
+
+
+def _convert_peft_lora_state_dict(
+    state_dict: dict[str, torch.Tensor],
+    transformer: nn.Module,
+) -> dict[str, torch.Tensor]:
+    return convert_diffusers_lora_state_dict(
+        state_dict,
+        transformer,
+        projection_specs=QKV_PROJECTION_SPECS,
+        normalize_state_dict=_normalize_peft_keys,
+        map_direct_pair=_map_direct_pair,
+        is_transformer_lora_key=lambda base: base.startswith("blocks."),
+    )
+
+
+def _normalize_peft_keys(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    tensors = {
+        strip_transformer_prefix(key): normalize_float_tensor(value)
+        for key, value in state_dict.items()
+    }
+    return apply_network_alphas(tensors, extract_network_alphas(tensors))
+
+
+def _map_direct_pair(
+    base_name: str,
+    lora_a: torch.Tensor,
+    lora_b: torch.Tensor,
+    modules: dict[str, SVDQW4A4Linear | AWQW4A16Linear],
+) -> list[tuple[str, torch.Tensor, torch.Tensor]]:
+    if base_name not in modules:
+        return []
+    return [(base_name, lora_a.contiguous(), lora_b.contiguous())]
+```
+
+The converter can reuse shared helpers from `nunchaku_lite.lora.conversion` and `nunchaku_lite.lora.peft`. Provide model-specific projection specs for fused QKV-style modules, a normalizer for incoming LoRA key formats, and a direct-pair mapper for ordinary projections. Unsupported transformer LoRA keys should fail in conversion instead of being silently ignored.
 
 ## Development
 

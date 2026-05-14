@@ -79,6 +79,19 @@ class FakeAdapter:
         )
         return checkpoint_state
 
+    def patch_pipeline(self, pipeline, *, component_name, component):
+        pipeline.patch_pipeline_context = SimpleNamespace(
+            component_name=component_name,
+            component=component,
+            adapter_target=self.target,
+        )
+
+
+class FakeAdapterWithoutPipelinePatch(FakeAdapter):
+    target = "fake_meta_no_pipeline_patch"
+
+    patch_pipeline = None
+
 
 def _fake_checkpoint(tmp_path):
     checkpoint = tmp_path / "fake.safetensors"
@@ -102,6 +115,16 @@ def _install_fake_adapter(monkeypatch):
     import nunchaku_lite.core as core
 
     monkeypatch.setitem(core._ADAPTERS, FakeAdapter.target, FakeAdapter())
+
+
+def _install_fake_adapter_without_pipeline_patch(monkeypatch):
+    import nunchaku_lite.core as core
+
+    monkeypatch.setitem(
+        core._ADAPTERS,
+        FakeAdapterWithoutPipelinePatch.target,
+        FakeAdapterWithoutPipelinePatch(),
+    )
 
 
 def test_import_does_not_import_full_nunchaku():
@@ -148,6 +171,38 @@ def test_load_nunchaku_pipeline_injects_meta_loaded_transformer(tmp_path, monkey
     assert FakePipeline.from_pretrained_kwargs["custom_arg"] == "forwarded"
     assert FakePipelineComponent.config_kwargs["subfolder"] == "transformer"
     assert FakePipelineComponent.config_kwargs["local_files_only"] is True
+    assert pipe.patch_pipeline_context.component_name == "transformer"
+    assert pipe.patch_pipeline_context.component is transformer
+    assert pipe.patch_pipeline_context.adapter_target == FakeAdapter.target
+
+
+def test_load_nunchaku_pipeline_allows_adapter_without_pipeline_patch(tmp_path, monkeypatch):
+    from nunchaku_lite import load_nunchaku_pipeline
+
+    _install_fake_adapter_without_pipeline_patch(monkeypatch)
+    pipe = load_nunchaku_pipeline(
+        tmp_path,
+        pipeline_cls=FakePipeline,
+        checkpoint=_fake_checkpoint(tmp_path),
+        target=FakeAdapterWithoutPipelinePatch.target,
+    )
+
+    assert pipe.transformer._nunchaku_lite_patched
+    assert not hasattr(pipe, "patch_pipeline_context")
+
+
+def test_load_nunchaku_pipeline_rejects_removed_bind_lora_argument(tmp_path, monkeypatch):
+    from nunchaku_lite import load_nunchaku_pipeline
+
+    _install_fake_adapter(monkeypatch)
+    with pytest.raises(TypeError, match="unexpected keyword argument 'bind_lora'"):
+        load_nunchaku_pipeline(
+            tmp_path,
+            pipeline_cls=FakePipeline,
+            checkpoint=_fake_checkpoint(tmp_path),
+            target=FakeAdapter.target,
+            bind_lora=False,
+        )
 
 
 def test_load_nunchaku_pipeline_auto_selects_unet(tmp_path, monkeypatch):

@@ -3,9 +3,9 @@ from types import MethodType, SimpleNamespace
 import pytest
 import torch
 
-from nunchaku_lite.lora.base import unpack_lowrank_weight
+from nunchaku_lite.lora.base import bind_pipeline_lora_methods, unpack_lowrank_weight
 from nunchaku_lite.lora.qwen_image import (
-    bind_qwen_image_pipeline_lora_methods,
+    NunchakuQwenImagePipelineLoraMixin,
     convert_qwen_image_lora_to_lite,
 )
 
@@ -140,7 +140,7 @@ def test_qwen_pipeline_lora_mixin_maps_diffusers_api_to_transformer_runtime():
         return state_dict
 
     pipeline.lora_state_dict = MethodType(lora_state_dict, pipeline)
-    bind_qwen_image_pipeline_lora_methods(pipeline)
+    bind_pipeline_lora_methods(pipeline, NunchakuQwenImagePipelineLoraMixin)
 
     pipeline.load_lora_weights(lora, adapter_name="lightning")
 
@@ -160,5 +160,5 @@ def test_qwen_unsupported_lora_target_raises():
         "transformer.transformer_blocks.0.not_a_module.lora_up.weight": torch.ones(64, 2),
     }
 
-    with pytest.raises(ValueError, match="Unsupported Qwen-Image LoRA target"):
+    with pytest.raises(ValueError, match="Unsupported Nunchaku LoRA target"):
         transformer.load_lora(lora)
