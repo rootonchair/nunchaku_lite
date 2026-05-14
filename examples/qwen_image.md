@@ -56,6 +56,81 @@ image.save(output_path)
 print(f"saved {output_path}")
 ```
 
+## Qwen-Image Lightning Runtime LoRA
+
+Use the same base Nunchaku Qwen checkpoint and load the Lightning adapter at runtime. The scheduler and `true_cfg_scale=1.0` match the LightX2V Qwen-Image-Lightning Diffusers example.
+
+```python
+import math
+from pathlib import Path
+
+import torch
+from diffusers import FlowMatchEulerDiscreteScheduler, QwenImagePipeline
+
+from nunchaku_lite import load_nunchaku_pipeline
+
+
+model_id = "Qwen/Qwen-Image"
+precision = "fp4"  # "int4" or "fp4"
+checkpoints = {
+    "int4": "nunchaku-tech/nunchaku-qwen-image/svdq-int4_r32-qwen-image.safetensors",
+    "fp4": "nunchaku-tech/nunchaku-qwen-image/svdq-fp4_r32-qwen-image.safetensors",
+}
+checkpoint = checkpoints[precision]
+output_path = Path(f"outputs/qwen_image_lightning_lora_{precision}.png")
+scheduler_config = {
+    "base_image_seq_len": 256,
+    "base_shift": math.log(3),
+    "invert_sigmas": False,
+    "max_image_seq_len": 8192,
+    "max_shift": math.log(3),
+    "num_train_timesteps": 1000,
+    "shift": 1.0,
+    "shift_terminal": None,
+    "stochastic_sampling": False,
+    "time_shift_type": "exponential",
+    "use_beta_sigmas": False,
+    "use_dynamic_shifting": True,
+    "use_exponential_sigmas": False,
+    "use_karras_sigmas": False,
+}
+
+pipe = load_nunchaku_pipeline(
+    model_id,
+    pipeline_cls=QwenImagePipeline,
+    checkpoint=checkpoint,
+    target="qwen_image",
+    precision=precision,
+    scheduler=FlowMatchEulerDiscreteScheduler.from_config(scheduler_config),
+    torch_dtype=torch.bfloat16,
+)
+pipe.enable_model_cpu_offload()
+
+pipe.load_lora_weights(
+    "lightx2v/Qwen-Image-Lightning",
+    weight_name="Qwen-Image-Lightning-4steps-V2.0-bf16.safetensors",
+    adapter_name="lightning",
+)
+pipe.set_adapters("lightning", adapter_weights=1.0)
+
+image = pipe(
+    prompt="a tiny astronaut hatching from an egg on the moon, Ultra HD, 4K, cinematic composition.",
+    negative_prompt=" ",
+    width=1024,
+    height=1024,
+    num_inference_steps=4,
+    true_cfg_scale=1.0,
+    generator=torch.Generator(device="cuda").manual_seed(0),
+).images[0]
+
+output_path.parent.mkdir(parents=True, exist_ok=True)
+image.save(output_path)
+pipe.unload_lora_weights()
+print(f"saved {output_path}")
+```
+
+Qwen-Image-Edit Lightning LoRAs use the same API with `QwenImageEditPlusPipeline` and the edit Lightning weights from `lightx2v/Qwen-Image-Lightning`, for example `Qwen-Image-Edit-2509/Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors`.
+
 ## Qwen-Image-Edit-2509 INT4 / FP4 Base
 
 Low-VRAM edit example for the base INT4 or FP4 checkpoint from `nunchaku-ai/nunchaku-qwen-image-edit-2509`.

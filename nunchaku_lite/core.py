@@ -431,11 +431,14 @@ def _extract_config_loading_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _bind_pipeline_runtime_methods(pipeline: Any, target: str) -> None:
-    if target != "flux":
-        return
-    from .lora import bind_flux_pipeline_lora_methods
+    if target == "flux":
+        from .lora import bind_flux_pipeline_lora_methods
 
-    bind_flux_pipeline_lora_methods(pipeline)
+        bind_flux_pipeline_lora_methods(pipeline)
+    elif target == "qwen_image":
+        from .lora import bind_qwen_image_pipeline_lora_methods
+
+        bind_qwen_image_pipeline_lora_methods(pipeline)
 
 
 def _materialize_known_meta_tensors(module: torch.nn.Module) -> None:

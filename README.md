@@ -41,7 +41,7 @@ The full `nunchaku` package in this repository exposes a broader set of model-sp
 - [x] SDXL UNet adapter based on `NunchakuSDXLUNet2DConditionModel`, covering SDXL and SDXL-Turbo examples.
 - [ ] Quantized T5 text encoder support based on `NunchakuT5EncoderModel`.
 - [x] FLUX runtime LoRA support, including Diffusers-format conversion, Nunchaku-format loading, strength control, reset, and multi-LoRA composition.
-- [ ] Qwen-Image runtime LoRA support, covering Qwen-Image and Qwen-Image-Edit families after LoRA key mapping is defined.
+- [x] Qwen-Image runtime LoRA support, covering Qwen-Image and Qwen-Image-Edit families after LoRA key mapping is defined.
 - [ ] Flux2 runtime LoRA support, reusing FLUX conversion patterns where compatible.
 - [ ] SDXL runtime LoRA support for quantized UNet attention and MLP projections.
 - [ ] Z-Image runtime LoRA support for quantized transformer projections.
@@ -169,9 +169,9 @@ Arguments:
 
 This is the low-level compatibility API for callers that already constructed a component. Prefer `load_nunchaku_pipeline` for normal pipeline loading because it avoids loading dense weights that are immediately replaced. The function is idempotent for the same target. A transformer patched once will be returned unchanged if patched again with the same target.
 
-### FLUX runtime LoRA
+### Runtime LoRA
 
-Patched FLUX transformers expose runtime LoRA methods:
+Patched FLUX and Qwen-Image transformers expose runtime LoRA methods:
 
 ```python
 pipe = load_nunchaku_pipeline(
@@ -187,9 +187,9 @@ pipe.set_adapters("artist", adapter_weights=0.5)
 pipe.unload_lora_weights()
 ```
 
-`load_lora` accepts Diffusers-format FLUX LoRAs and Nunchaku-format low-rank tensors. Multiple LoRAs can be active at once; they are recomposed from the original checkpoint low-rank state when strengths change or one LoRA is reset.
+`load_lora` accepts Diffusers-format LoRAs and Nunchaku-format low-rank tensors for supported adapters. Multiple LoRAs can be active at once; they are recomposed from the original checkpoint low-rank state when strengths change or one LoRA is reset.
 
-`load_nunchaku_pipeline` binds Diffusers-style pipeline LoRA methods for FLUX automatically. Advanced callers using `patch_transformer` directly can still bind those methods manually with `nunchaku_lite.lora.bind_flux_pipeline_lora_methods(pipe)`.
+`load_nunchaku_pipeline` binds Diffusers-style pipeline LoRA methods for FLUX and Qwen-Image automatically. Advanced callers using `patch_transformer` directly can still bind those methods manually with `nunchaku_lite.lora.bind_flux_pipeline_lora_methods(pipe)` or `nunchaku_lite.lora.bind_qwen_image_pipeline_lora_methods(pipe)`.
 
 ### Adapter Registry
 
@@ -277,58 +277,6 @@ Adapter responsibilities:
 `patch_modules_recursively` mutates the selected module tree in place and returns a `ModulePatchReport` with replacement and skip counts. Use `linear_filter` or narrow roots so only checkpoint-backed dense projections are replaced. Use `module_converters` for exact-class model blocks that can be normalized before descending. Use `custom_attention_converters` for Diffusers `Attention` subclasses that require a model-specific replacement; unsupported attention subclasses now raise `TypeError` instead of being silently skipped.
 
 Avoid adding a pipeline subclass for a new model unless the upstream Diffusers pipeline itself requires one. The preferred integration is `load_nunchaku_pipeline(model_id, pipeline_cls=..., checkpoint=..., target="...")`.
-
-## Benchmarking
-
-The repository includes a benchmark that compares an unmodified Diffusers Z-Image pipeline with the `nunchaku_lite` patched transformer.
-
-```bash
-python benchmarks/benchmark_z_image.py \
-  --model-id Tongyi-MAI/Z-Image-Turbo \
-  --checkpoint nunchaku-ai/nunchaku-z-image-turbo/svdq-fp4_r128-z-image-turbo.safetensors \
-  --precision fp4 \
-  --dtype bf16 \
-  --runs 3 \
-  --warmup-runs 1
-```
-
-Outputs are written to `outputs/benchmark_z_image/` and include generated images plus a `summary.json` file with timing and CUDA memory statistics.
-
-Flux benchmark:
-
-```bash
-python benchmarks/benchmark_flux.py \
-  --model-id black-forest-labs/FLUX.1-schnell \
-  --checkpoint nunchaku-ai/nunchaku-flux.1-schnell/svdq-fp4_r32-flux.1-schnell.safetensors \
-  --precision fp4 \
-  --dtype bf16 \
-  --runs 3 \
-  --warmup-runs 1
-```
-
-Flux2 benchmark:
-
-```bash
-python benchmarks/benchmark_flux2.py \
-  --model-id tonera/FLUX.2-klein-9B-Nunchaku \
-  --checkpoint tonera/FLUX.2-klein-9B-Nunchaku/svdq-fp4_r32-FLUX.2-klein-9B-Nunchaku.safetensors \
-  --precision fp4 \
-  --dtype bf16 \
-  --runs 3 \
-  --warmup-runs 1
-```
-
-Qwen-Image benchmark:
-
-```bash
-python benchmarks/benchmark_qwen_image.py \
-  --model-id Qwen/Qwen-Image \
-  --checkpoint nunchaku-tech/nunchaku-qwen-image/svdq-fp4_r32-qwen-image.safetensors \
-  --precision fp4 \
-  --dtype bf16 \
-  --runs 3 \
-  --warmup-runs 1
-```
 
 ## Development
 

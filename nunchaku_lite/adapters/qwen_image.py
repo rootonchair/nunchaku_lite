@@ -567,6 +567,9 @@ class QwenImageAdapter:
         transformer._nunchaku_lite_qwen_image_original_forward = transformer.forward
         transformer.forward = types.MethodType(lite_qwen_image_forward, transformer)
         finalize_svdq_checkpoint(transformer, checkpoint_state, context)
+        from ..lora.qwen_image import bind_qwen_image_lora_methods
+
+        bind_qwen_image_lora_methods(transformer)
         transformer._nunchaku_lite_qwen_image_patched = True
         return checkpoint_state
 
