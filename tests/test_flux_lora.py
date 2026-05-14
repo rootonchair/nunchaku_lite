@@ -7,8 +7,7 @@ from safetensors.torch import save_file
 
 from nunchaku_lite import patch_transformer
 from nunchaku_lite.adapters.flux import FluxAdapter
-from nunchaku_lite.lora.base import bind_pipeline_lora_methods
-from nunchaku_lite.lora.flux import NunchakuFluxPipelineLoraMixin, convert_flux_lora_to_lite, unpack_lowrank_weight
+from nunchaku_lite.lora.base import NunchakuPipelineLoraMixin, bind_pipeline_lora_methods, unpack_lowrank_weight
 
 from test_flux_adapter import make_tiny_flux_transformer
 
@@ -182,7 +181,7 @@ def test_load_diffusers_adanorm_lora_sets_awq_side_branch(tmp_path):
     assert module._nunchaku_lite_lora_up.shape == (module.out_features, 0)
 
 
-def test_convert_diffusers_qkv_lora_to_lite_fused_projection(tmp_path):
+def test_convert_diffusers_qkv_lora_to_nunchaku_fused_projection(tmp_path):
     transformer = make_patched_flux_transformer(tmp_path, rank=4)
     rank = 2
     lora = {}
@@ -191,7 +190,7 @@ def test_convert_diffusers_qkv_lora_to_lite_fused_projection(tmp_path):
         lora[f"{base}.lora_A.weight"] = torch.full((rank, 32), float(index), dtype=torch.bfloat16)
         lora[f"{base}.lora_B.weight"] = torch.full((32, rank), float(index), dtype=torch.bfloat16)
 
-    converted = convert_flux_lora_to_lite(lora, transformer)
+    converted = transformer._convert_lora_to_nunchaku(lora)
 
     assert set(converted) == {
         "transformer_blocks.0.attn.to_qkv.proj_down",
@@ -217,7 +216,7 @@ def test_convert_single_proj_out_lora_splits_attn_before_mlp(tmp_path):
         ),
     }
 
-    converted = convert_flux_lora_to_lite(lora, transformer)
+    converted = transformer._convert_lora_to_nunchaku(lora)
 
     converted_attn = unpack_lowrank_weight(
         converted["single_transformer_blocks.0.attn.to_out.proj_down"], down=True
@@ -259,7 +258,7 @@ def test_pipeline_lora_mixin_maps_diffusers_api_to_transformer_runtime(tmp_path)
         return state_dict
 
     pipeline.lora_state_dict = MethodType(lora_state_dict, pipeline)
-    bind_pipeline_lora_methods(pipeline, NunchakuFluxPipelineLoraMixin)
+    bind_pipeline_lora_methods(pipeline, NunchakuPipelineLoraMixin)
 
     pipeline.load_lora_weights(lora, adapter_name="style")
 
@@ -301,7 +300,7 @@ def test_pipeline_lora_mixin_rejects_unsupported_apis_and_text_encoder_lora(tmp_
         return state_dict
 
     pipeline.lora_state_dict = MethodType(lora_state_dict, pipeline)
-    bind_pipeline_lora_methods(pipeline, NunchakuFluxPipelineLoraMixin)
+    bind_pipeline_lora_methods(pipeline, NunchakuPipelineLoraMixin)
     text_lora = {
         "text_encoder.encoder.layers.0.self_attn.q_proj.lora_A.weight": torch.ones(1, 4),
         "text_encoder.encoder.layers.0.self_attn.q_proj.lora_B.weight": torch.ones(4, 1),
@@ -313,3 +312,11 @@ def test_pipeline_lora_mixin_rejects_unsupported_apis_and_text_encoder_lora(tmp_
         pipeline.fuse_lora()
     with pytest.raises(NotImplementedError, match="does not support fusing"):
         pipeline.unfuse_lora()
+
+
+def test_pipeline_lora_mixin_requires_bound_transformer_lora_runtime():
+    pipeline = SimpleNamespace(transformer=SimpleNamespace())
+    bind_pipeline_lora_methods(pipeline, NunchakuPipelineLoraMixin)
+
+    with pytest.raises(RuntimeError, match="not bound to the nunchaku_lite transformer LoRA runtime"):
+        pipeline.get_list_adapters()

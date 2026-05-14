@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
 
 import torch
 
@@ -15,7 +14,6 @@ from .base import (
     pack_lowrank_weight,
     pad_lora_tensor,
 )
-from .peft import peft_lora_pairs
 
 
 LORA_ERROR_LABEL = "Nunchaku LoRA"
@@ -30,10 +28,28 @@ class FusedProjectionSpec:
 
     @property
     def suffixes(self) -> tuple[str, ...]:
+        """Return branch suffixes in the order they should be packed."""
+
         return tuple(branch.rsplit(".", 1)[-1] for branch in self.branches)
 
 
+QKV_PROJECTION_SPECS = (
+    FusedProjectionSpec(target=".attn.to_qkv", branches=(".attn.to_q", ".attn.to_k", ".attn.to_v")),
+    FusedProjectionSpec(
+        target=".attn.add_qkv_proj",
+        branches=(".attn.add_q_proj", ".attn.add_k_proj", ".attn.add_v_proj"),
+    ),
+)
+
+
 def strip_transformer_prefix(key: str) -> str:
+    """Remove Diffusers transformer wrapper prefixes from a LoRA tensor key.
+
+    Args:
+        key: Original state-dict key, possibly prefixed with ``transformer.`` or
+            ``base_model.model.transformer.``.
+    """
+
     for prefix in ("base_model.model.transformer.", "transformer."):
         if key.startswith(prefix):
             return key[len(prefix) :]
@@ -45,84 +61,73 @@ def is_nunchaku_lite_lora_state_dict(
     *,
     diffusers_markers: tuple[str, ...] = ("lora_A", "lora_B", "lora_down.weight", "lora_up.weight"),
 ) -> bool:
-    """Return whether a state dict already uses Nunchaku-style low-rank keys."""
+    """Return whether a state dict already uses Nunchaku-style low-rank keys.
+
+    The converter accepts both already-packed Nunchaku Lite LoRAs and external
+    Diffusers/PEFT LoRAs. This predicate routes the input before conversion:
+    lite LoRAs are normalized and validated, while Diffusers/PEFT LoRAs need
+    key conversion, fused-projection handling, and tensor packing.
+
+    Args:
+        state_dict: Input LoRA tensors keyed by checkpoint/state-dict names.
+        diffusers_markers: Key fragments that identify Diffusers/PEFT LoRA
+            tensors and should prevent treating mixed inputs as lite format.
+    """
 
     has_lite_key = any(key.endswith((".proj_down", ".proj_up", ".lora_down", ".lora_up")) for key in state_dict)
     has_diffusers_key = any(any(marker in key for marker in diffusers_markers) for key in state_dict)
     return has_lite_key and not has_diffusers_key
 
 
-def normalize_lite_lora_state_dict(
+def normalize_nunchaku_lora_state_dict(
     state_dict: dict[str, torch.Tensor],
     transformer,
-    *,
-    key_converter: Callable[[dict[str, torch.Tensor]], dict[str, torch.Tensor]] | None = None,
 ) -> dict[str, torch.Tensor]:
-    """Normalize Nunchaku-format low-rank keys and validate target modules."""
+    """Normalize standard Nunchaku-format low-rank keys and validate them.
 
-    source = key_converter(state_dict) if key_converter is not None else state_dict
+    Args:
+        state_dict: LoRA tensors with keys ending in ``.proj_down/.proj_up`` or
+            older ``.lora_down/.lora_up`` names.
+        transformer: Patched transformer whose quantized linear modules define
+            valid target names and expected input/output feature sizes.
+    """
+
+    return normalize_nunchaku_lora_keys_and_validate(state_dict, transformer)
+
+
+def normalize_nunchaku_lora_keys_and_validate(
+    state_dict: dict[str, torch.Tensor],
+    transformer,
+) -> dict[str, torch.Tensor]:
+    """Canonicalize Nunchaku-format LoRA keys, then validate tensor pairs against a model.
+
+    Args:
+        state_dict: State dict already using Nunchaku-format target names.
+        transformer: Patched transformer used to validate module names and
+            coerce tensor orientation/shape for each target module.
+    """
+
     converted = {}
-    for key, value in source.items():
+    for key, value in state_dict.items():
         new_key = strip_transformer_prefix(key)
         new_key = new_key.replace(".lora_down", ".proj_down")
         new_key = new_key.replace(".lora_up", ".proj_up")
         converted[new_key] = value
-    return validate_lite_lora_state_dict(converted, transformer)
-
-
-def convert_diffusers_lora_state_dict(
-    state_dict: dict[str, torch.Tensor],
-    transformer,
-    *,
-    projection_specs: tuple[FusedProjectionSpec, ...],
-    normalize_state_dict: Callable[[dict[str, torch.Tensor]], dict[str, torch.Tensor]],
-    map_direct_pair: Callable[
-        [str, torch.Tensor, torch.Tensor, dict[str, SVDQW4A4Linear | AWQW4A16Linear]],
-        list[tuple[str, torch.Tensor, torch.Tensor]],
-    ],
-    is_transformer_lora_key: Callable[[str], bool],
-    set_pair: Callable[
-        [dict[str, torch.Tensor], str, torch.Tensor, torch.Tensor, SVDQW4A4Linear | AWQW4A16Linear],
-        None,
-    ] | None = None,
-) -> dict[str, torch.Tensor]:
-    """Convert normalized Diffusers/PEFT LoRA pairs into lite low-rank tensors."""
-
-    if set_pair is None:
-        set_pair = set_converted_lora_pair
-    diffusers_state = normalize_state_dict(state_dict)
-    modules = lora_modules(transformer)
-    pairs = peft_lora_pairs(diffusers_state)
-    converted: dict[str, torch.Tensor] = {}
-
-    handled: set[str] = set()
-    grouped = group_fused_projection_pairs(pairs, projection_specs)
-    for target_name, (spec, branches) in grouped.items():
-        if target_name not in modules:
-            continue
-        module = modules[target_name]
-        down, up = fuse_projection_branches(branches, module, pairs, spec)
-        set_pair(converted, target_name, down, up, module)
-        handled.update(branches)
-
-    for base_name, (lora_a, lora_b) in pairs.items():
-        if base_name in handled:
-            continue
-        for target_name, down, up in map_direct_pair(base_name, lora_a, lora_b, modules):
-            set_pair(converted, target_name, down, up, modules[target_name])
-            handled.add(base_name)
-
-    unsupported = sorted(base for base in pairs if base not in handled and is_transformer_lora_key(base))
-    if unsupported:
-        sample = ", ".join(unsupported[:5])
-        raise ValueError(f"Unsupported {LORA_ERROR_LABEL} target(s) for nunchaku_lite: {sample}")
-    return validate_lite_lora_state_dict(converted, transformer)
+    return validate_nunchaku_lora_state_dict(converted, transformer)
 
 
 def group_fused_projection_pairs(
     pairs: dict[str, tuple[torch.Tensor, torch.Tensor]],
     specs: tuple[FusedProjectionSpec, ...],
 ) -> dict[str, tuple[FusedProjectionSpec, list[str]]]:
+    """Group PEFT LoRA pairs that should be merged into fused projections.
+
+    Args:
+        pairs: Mapping from PEFT base names to ``(lora_A, lora_B)`` tensors.
+        specs: Fused projection descriptions, such as separate q/k/v branches
+            that map to one packed qkv target.
+    """
+
     groups: dict[str, tuple[FusedProjectionSpec, list[str]]] = {}
     for base in pairs:
         for spec in specs:
@@ -144,6 +149,16 @@ def fuse_projection_branches(
     pairs: dict[str, tuple[torch.Tensor, torch.Tensor]],
     spec: FusedProjectionSpec,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build one low-rank pair for a fused projection from branch LoRA pairs.
+
+    Args:
+        branch_names: PEFT base names present for this fused target.
+        module: Quantized target projection; its output size determines branch
+            layout when q/k/v ranks differ.
+        pairs: Mapping from PEFT base names to ``(lora_A, lora_B)`` tensors.
+        spec: Fused projection layout describing branch order and target name.
+    """
+
     if len(branch_names) == 1 and spec.target in branch_names[0]:
         lora_a, lora_b = pairs[branch_names[0]]
         return lora_a.contiguous(), lora_b.contiguous()
@@ -183,31 +198,46 @@ def fuse_projection_branches(
     return down.contiguous(), up.contiguous()
 
 
-def set_converted_lora_pair(
+def set_standard_converted_lora_pair(
     converted: dict[str, torch.Tensor],
     target_name: str,
     down: torch.Tensor,
     up: torch.Tensor,
     module: SVDQW4A4Linear | AWQW4A16Linear,
-    *,
-    awq_up_transform: Callable[[str, torch.Tensor], torch.Tensor] | None = None,
 ) -> None:
+    """Store a converted low-rank pair using the packing expected by a module.
+
+    Args:
+        converted: Output state dict being assembled.
+        target_name: Patched module name without the ``.proj_down/.proj_up``
+            suffix.
+        down: Logical LoRA down tensor in rank-by-input layout.
+        up: Logical LoRA up tensor in output-by-rank layout.
+        module: Target quantized linear module that determines whether tensors
+            are packed for SVDQ W4A4 or padded for AWQ W4A16.
+    """
+
     if isinstance(module, SVDQW4A4Linear):
         down = pack_lowrank_weight(down, down=True)
         up = pack_lowrank_weight(up, down=False)
     else:
-        if awq_up_transform is not None:
-            up = awq_up_transform(target_name, up)
         down = pad_lora_tensor(down, divisor=16, dim=0)
         up = pad_lora_tensor(up, divisor=16, dim=1)
     converted[f"{target_name}.proj_down"] = down
     converted[f"{target_name}.proj_up"] = up
 
 
-def validate_lite_lora_state_dict(
+def validate_nunchaku_lora_state_dict(
     state_dict: dict[str, torch.Tensor],
     transformer,
 ) -> dict[str, torch.Tensor]:
+    """Validate Nunchaku-format LoRA tensor pairs and coerce them to module dimensions.
+
+    Args:
+        state_dict: Nunchaku-format LoRA state dict with ``.proj_down/.proj_up`` keys.
+        transformer: Patched transformer containing target SVDQ/AWQ modules.
+    """
+
     modules = lora_modules(transformer)
     if not state_dict:
         raise ValueError(f"LoRA state dict did not contain any supported {LORA_ERROR_LABEL} projection tensors.")

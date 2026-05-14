@@ -26,7 +26,7 @@ TRANSFORMER_LORA_METHODS = (
     "get_list_adapters",
     "get_active_adapters",
     "fuse_lora",
-    "_convert_lora_to_lite",
+    "_convert_lora_to_nunchaku",
 )
 
 PIPELINE_LORA_METHODS = (
@@ -42,13 +42,20 @@ PIPELINE_LORA_METHODS = (
     "fuse_lora",
     "unfuse_lora",
     "_pipeline_transformer",
-    "_bind_transformer_lora_methods",
 )
 
 RUNTIME_LORA_LABEL = "Nunchaku LoRA"
 
 
 def bind_mixin_methods(instance, mixin_cls: type, method_names: tuple[str, ...]) -> None:
+    """Bind selected methods from a mixin class onto one runtime instance.
+
+    Args:
+        instance: Object that should receive bound methods.
+        mixin_cls: Class providing unbound method implementations.
+        method_names: Names to copy from ``mixin_cls`` onto ``instance``.
+    """
+
     for method_name in method_names:
         setattr(instance, method_name, MethodType(getattr(mixin_cls, method_name), instance))
 
@@ -57,6 +64,13 @@ def bind_transformer_lora_methods(
     transformer: nn.Module,
     mixin_cls: type,
 ) -> None:
+    """Attach transformer-level LoRA runtime methods to a patched module.
+
+    Args:
+        transformer: Patched transformer that will own adapter state.
+        mixin_cls: Model-specific mixin implementing conversion hooks.
+    """
+
     bind_mixin_methods(transformer, mixin_cls, TRANSFORMER_LORA_METHODS)
     ensure_lora_runtime(transformer)
 
@@ -67,6 +81,16 @@ def bind_pipeline_lora_methods(
     *,
     component_name: str = "transformer",
 ) -> None:
+    """Attach Diffusers-compatible LoRA methods to a pipeline object.
+
+    Args:
+        pipeline: Pipeline instance whose component should receive runtime LoRA
+            operations.
+        mixin_cls: Model-specific pipeline mixin implementation.
+        component_name: Name of the pipeline component containing the patched
+            transformer or UNet.
+    """
+
     pipeline._nunchaku_lite_lora_component_name = component_name
     bind_mixin_methods(pipeline, mixin_cls, PIPELINE_LORA_METHODS)
     pipeline._nunchaku_lite_lora_pipeline_api_bound = True
@@ -83,6 +107,15 @@ class NunchakuLoraMixin:
         name: str | None = None,
         replace: bool = False,
     ) -> str:
+        """Load a runtime LoRA adapter into this patched transformer.
+
+        Args:
+            path_or_state_dict: Safetensors path or already loaded LoRA state dict.
+            strength: Initial adapter scale.
+            name: Optional adapter name.
+            replace: Whether to clear existing adapters before loading.
+        """
+
         return load_lora(self, path_or_state_dict, strength=strength, name=name, replace=replace)
 
     def load_lora_adapter(
@@ -92,6 +125,17 @@ class NunchakuLoraMixin:
         hotswap: bool = False,
         **kwargs,
     ) -> str:
+        """Load a Diffusers/PEFT-style adapter dict through the transformer API.
+
+        Args:
+            pretrained_model_name_or_path_or_dict: State dict passed by the
+                Diffusers loader path.
+            prefix: Component prefix to strip from keys before conversion.
+            hotswap: Unsupported PEFT hotswap flag.
+            **kwargs: Diffusers loader options; supported adapter metadata is
+                consumed and unsupported runtime options are ignored.
+        """
+
         if hotswap:
             raise NotImplementedError(
                 f"nunchaku_lite {RUNTIME_LORA_LABEL} runtime does not support PEFT hotswap."
@@ -108,49 +152,93 @@ class NunchakuLoraMixin:
         return self.load_lora(state_dict, name=adapter_name)
 
     def set_lora_strength(self, strength: float = 1.0, name: str | None = None) -> None:
+        """Set the scale for one loaded adapter.
+
+        Args:
+            strength: New adapter scale.
+            name: Adapter name, required when multiple adapters are active.
+        """
+
         set_lora_strength(self, strength=strength, name=name)
 
     def set_adapters(self, adapter_names: list[str] | str, weights=None) -> None:
+        """Select active adapters and optional per-adapter weights.
+
+        Args:
+            adapter_names: Adapter name or names to enable.
+            weights: Optional scalar/list/dict weights matching Diffusers API.
+        """
+
         set_active_adapters(self, adapter_names, weights)
 
     def reset_lora(self, name: str | None = None) -> None:
+        """Remove one adapter or all adapters and restore base low-rank state.
+
+        Args:
+            name: Adapter name to remove, or ``None`` to remove all adapters.
+        """
+
         reset_lora(self, name=name)
 
     def delete_adapters(self, adapter_names: list[str] | str) -> None:
+        """Delete one or more named adapters.
+
+        Args:
+            adapter_names: Adapter name or names to remove.
+        """
+
         if isinstance(adapter_names, str):
             adapter_names = [adapter_names]
         for adapter_name in adapter_names:
             self.reset_lora(adapter_name)
 
     def unload_lora(self) -> None:
+        """Unload every runtime LoRA adapter from this transformer."""
+
         self.reset_lora()
 
     def enable_lora(self) -> None:
+        """Enable runtime LoRA composition and reapply active adapters."""
+
         ensure_lora_runtime(self)
         self._nunchaku_lite_lora_enabled = True
         recompose_loras(self)
 
     def disable_lora(self) -> None:
+        """Disable runtime LoRA composition while keeping loaded adapters."""
+
         ensure_lora_runtime(self)
         self._nunchaku_lite_lora_enabled = False
         recompose_loras(self)
 
     def get_list_adapters(self) -> list[str]:
+        """Return loaded adapter names in insertion order."""
+
         ensure_lora_runtime(self)
         return list(self._nunchaku_lite_loras)
 
     def get_active_adapters(self) -> list[str]:
+        """Return currently active adapter names."""
+
         return active_lora_names(self)
 
     def fuse_lora(self, *args, **kwargs) -> None:
+        """Reject Diffusers fuse requests because runtime LoRAs stay separate."""
+
         raise NotImplementedError(
             f"nunchaku_lite {RUNTIME_LORA_LABEL} runtime keeps adapters as low-rank branches."
         )
 
-    def _convert_lora_to_lite(
+    def _convert_lora_to_nunchaku(
         self,
         path_or_state_dict: str | Path | dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
+        """Convert model-specific LoRA input into Nunchaku Lite tensors.
+
+        Args:
+            path_or_state_dict: Safetensors path or loaded LoRA state dict.
+        """
+
         raise NotImplementedError
 
 
@@ -166,6 +254,16 @@ class NunchakuPipelineLoraMixin:
         hotswap: bool = False,
         **kwargs,
     ) -> None:
+        """Load LoRA weights through a Diffusers-compatible pipeline API.
+
+        Args:
+            pretrained_model_name_or_path_or_dict: Path, repo id, or state dict
+                accepted by the pipeline's ``lora_state_dict`` loader.
+            adapter_name: Optional runtime adapter name.
+            hotswap: Unsupported PEFT hotswap flag.
+            **kwargs: Extra loader options forwarded to ``lora_state_dict``.
+        """
+
         if hotswap:
             raise NotImplementedError(
                 f"nunchaku_lite {RUNTIME_LORA_LABEL} runtime does not support PEFT hotswap."
@@ -208,6 +306,16 @@ class NunchakuPipelineLoraMixin:
         hotswap: bool = False,
         **kwargs,
     ) -> None:
+        """Alias ``load_lora_weights`` for PEFT/Diffusers compatibility.
+
+        Args:
+            pretrained_model_name_or_path_or_dict: LoRA source accepted by
+                ``load_lora_weights``.
+            adapter_name: Optional runtime adapter name.
+            hotswap: Unsupported PEFT hotswap flag.
+            **kwargs: Extra loader options forwarded to ``load_lora_weights``.
+        """
+
         self.load_lora_weights(
             pretrained_model_name_or_path_or_dict,
             adapter_name=adapter_name,
@@ -220,15 +328,35 @@ class NunchakuPipelineLoraMixin:
         adapter_names: list[str] | str,
         adapter_weights: float | dict | list[float] | list[dict] | None = None,
     ) -> None:
+        """Select active pipeline adapters and optional component weights.
+
+        Args:
+            adapter_names: Adapter name or names to activate.
+            adapter_weights: Scalar/list/dict weights accepted by Diffusers APIs.
+        """
+
         transformer = self._pipeline_transformer()
         component_name = getattr(self, "_nunchaku_lite_lora_component_name", "transformer")
         weights = transformer_adapter_weights(adapter_weights, component_name)
         transformer.set_adapters(adapter_names, weights)
 
     def delete_adapters(self, adapter_names: list[str] | str) -> None:
+        """Delete one or more adapters from the patched pipeline component.
+
+        Args:
+            adapter_names: Adapter name or names to remove.
+        """
+
         self._pipeline_transformer().delete_adapters(adapter_names)
 
     def unload_lora_weights(self, reset_to_overwritten_params: bool = False) -> None:
+        """Unload all LoRA weights from the patched pipeline component.
+
+        Args:
+            reset_to_overwritten_params: Unsupported Diffusers option because
+                this runtime never overwrites dense parameters.
+        """
+
         if reset_to_overwritten_params:
             raise NotImplementedError(
                 f"nunchaku_lite {RUNTIME_LORA_LABEL} runtime does not overwrite dense params."
@@ -236,40 +364,55 @@ class NunchakuPipelineLoraMixin:
         self._pipeline_transformer().unload_lora()
 
     def enable_lora(self) -> None:
+        """Enable LoRA composition on the patched pipeline component."""
+
         self._pipeline_transformer().enable_lora()
 
     def disable_lora(self) -> None:
+        """Disable LoRA composition on the patched pipeline component."""
+
         self._pipeline_transformer().disable_lora()
 
     def get_list_adapters(self) -> dict[str, list[str]]:
+        """Return loaded adapter names grouped by pipeline component."""
+
         component_name = getattr(self, "_nunchaku_lite_lora_component_name", "transformer")
         return {component_name: self._pipeline_transformer().get_list_adapters()}
 
     def get_active_adapters(self) -> list[str]:
+        """Return active adapter names for the patched pipeline component."""
+
         return self._pipeline_transformer().get_active_adapters()
 
     def fuse_lora(self, *args, **kwargs) -> None:
+        """Reject Diffusers fuse requests for quantized runtime LoRAs."""
+
         raise NotImplementedError(
             f"nunchaku_lite {RUNTIME_LORA_LABEL} runtime does not support fusing into quantized weights."
         )
 
     def unfuse_lora(self, *args, **kwargs) -> None:
+        """Reject Diffusers unfuse requests for quantized runtime LoRAs."""
+
         raise NotImplementedError(
             f"nunchaku_lite {RUNTIME_LORA_LABEL} runtime does not support fusing into quantized weights."
         )
 
     def _pipeline_transformer(self) -> nn.Module:
+        """Return the patched pipeline component with transformer LoRA APIs."""
+
         component_name = getattr(self, "_nunchaku_lite_lora_component_name", "transformer")
         transformer = getattr(self, component_name, None)
         if transformer is None:
             transformer_name = getattr(self, "transformer_name", component_name)
             transformer = getattr(self, transformer_name)
-        if not hasattr(transformer, "load_lora"):
-            self._bind_transformer_lora_methods(transformer)
+        if not callable(getattr(transformer, "load_lora", None)):
+            raise RuntimeError(
+                f"Pipeline component {component_name!r} is not bound to the nunchaku_lite "
+                "transformer LoRA runtime. Patch the transformer with its adapter before "
+                "binding pipeline LoRA methods."
+            )
         return transformer
-
-    def _bind_transformer_lora_methods(self, transformer: nn.Module) -> None:
-        raise NotImplementedError
 
 
 def load_lora(
@@ -280,7 +423,16 @@ def load_lora(
     name: str | None = None,
     replace: bool = False,
 ) -> str:
-    """Load a LoRA into a patched transformer and return its adapter name."""
+    """Load a LoRA into a patched transformer and return its adapter name.
+
+    Args:
+        transformer: Patched transformer with bound Nunchaku Lite LoRA methods.
+        path_or_state_dict: Safetensors path or in-memory LoRA state dict.
+        strength: Initial adapter scale used when composing active LoRAs.
+        name: Optional adapter name. If omitted, a path stem or generated name
+            is used.
+        replace: Whether to remove existing adapters before loading this one.
+    """
 
     ensure_lora_base_state(transformer)
     if replace:
@@ -288,7 +440,7 @@ def load_lora(
         transformer._nunchaku_lite_active_loras.clear()
 
     lora_name = resolve_lora_name(transformer, path_or_state_dict, name)
-    converted = transformer._convert_lora_to_lite(path_or_state_dict)
+    converted = transformer._convert_lora_to_nunchaku(path_or_state_dict)
     converted = {key: value.detach().cpu() for key, value in converted.items()}
     transformer._nunchaku_lite_loras[lora_name] = {"state_dict": converted, "strength": float(strength)}
     transformer._nunchaku_lite_active_loras = [
@@ -300,7 +452,13 @@ def load_lora(
 
 
 def set_lora_strength(transformer: nn.Module, strength: float = 1.0, name: str | None = None) -> None:
-    """Set the strength for one active LoRA and recompose all active adapters."""
+    """Set one adapter strength and recompose all active LoRAs.
+
+    Args:
+        transformer: Patched transformer containing runtime adapter state.
+        strength: New scalar multiplier for the adapter.
+        name: Adapter name. Required when more than one adapter is active.
+    """
 
     ensure_lora_runtime(transformer)
     if not transformer._nunchaku_lite_loras:
@@ -318,7 +476,12 @@ def set_lora_strength(transformer: nn.Module, strength: float = 1.0, name: str |
 
 
 def reset_lora(transformer: nn.Module, name: str | None = None) -> None:
-    """Reset all LoRAs or remove one named LoRA from a patched transformer."""
+    """Remove adapters from a patched transformer and restore base low-rank state.
+
+    Args:
+        transformer: Patched transformer containing runtime adapter state.
+        name: Optional adapter name. When omitted, all adapters are removed.
+    """
 
     ensure_lora_runtime(transformer)
     if name is None:
@@ -336,12 +499,27 @@ def reset_lora(transformer: nn.Module, name: str | None = None) -> None:
 
 
 def load_lora_state_dict(path_or_state_dict: str | Path | dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Load a LoRA state dict from memory or a safetensors file.
+
+    Args:
+        path_or_state_dict: Existing state dict or path to a safetensors file.
+    """
+
     if isinstance(path_or_state_dict, dict):
         return dict(path_or_state_dict)
     return load_state_dict_in_safetensors(path_or_state_dict)
 
 
-def strip_component_prefixes(state_dict: dict[str, torch.Tensor], prefix: str = "transformer") -> dict[str, torch.Tensor]:
+def strip_component_prefixes(
+    state_dict: dict[str, torch.Tensor], prefix: str = "transformer"
+) -> dict[str, torch.Tensor]:
+    """Remove pipeline component prefixes from LoRA state-dict keys.
+
+    Args:
+        state_dict: LoRA tensors keyed by pipeline or model component names.
+        prefix: Component prefix to remove, usually ``transformer``.
+    """
+
     prefixes = (
         f"{prefix}.",
         f"base_model.model.{prefix}.",
@@ -358,6 +536,13 @@ def strip_component_prefixes(state_dict: dict[str, torch.Tensor], prefix: str = 
 
 
 def raise_if_text_encoder_lora(state_dict: dict[str, torch.Tensor]) -> None:
+    """Reject LoRA state dicts that target text encoder modules.
+
+    Args:
+        state_dict: Candidate LoRA tensors to inspect before transformer-only
+            runtime loading.
+    """
+
     text_keys = [
         key
         for key in state_dict
@@ -372,6 +557,14 @@ def raise_if_text_encoder_lora(state_dict: dict[str, torch.Tensor]) -> None:
 
 
 def transformer_adapter_weights(adapter_weights, component_name: str = "transformer"):
+    """Extract the transformer component weights from Diffusers adapter weights.
+
+    Args:
+        adapter_weights: Scalar, list, or component-name dict accepted by
+            Diffusers pipeline APIs.
+        component_name: Component key to read when weights are dictionaries.
+    """
+
     if isinstance(adapter_weights, dict):
         return adapter_weights.get(component_name)
     if isinstance(adapter_weights, list):
@@ -383,6 +576,15 @@ def transformer_adapter_weights(adapter_weights, component_name: str = "transfor
 
 
 def set_active_adapters(transformer: nn.Module, adapter_names: list[str] | str, weights=None) -> None:
+    """Select active adapters and update their runtime weights.
+
+    Args:
+        transformer: Patched transformer containing loaded adapters.
+        adapter_names: Adapter name or ordered list of adapter names to enable.
+        weights: Optional scalar/list/dict weights matching Diffusers adapter
+            API conventions.
+    """
+
     ensure_lora_runtime(transformer)
     adapter_names = [adapter_names] if isinstance(adapter_names, str) else list(adapter_names)
     if not isinstance(weights, list):
@@ -406,6 +608,12 @@ def set_active_adapters(transformer: nn.Module, adapter_names: list[str] | str, 
 
 
 def active_lora_names(transformer: nn.Module) -> list[str]:
+    """Return currently active adapter names, respecting the global enable flag.
+
+    Args:
+        transformer: Patched transformer containing runtime adapter state.
+    """
+
     ensure_lora_runtime(transformer)
     if not transformer._nunchaku_lite_lora_enabled:
         return []
@@ -413,10 +621,22 @@ def active_lora_names(transformer: nn.Module) -> list[str]:
 
 
 def active_lora_entries(transformer: nn.Module) -> list[dict]:
+    """Return active adapter metadata entries in composition order.
+
+    Args:
+        transformer: Patched transformer containing runtime adapter state.
+    """
+
     return [transformer._nunchaku_lite_loras[name] for name in active_lora_names(transformer)]
 
 
 def ensure_lora_runtime(transformer: nn.Module) -> None:
+    """Initialize runtime LoRA bookkeeping fields if they are missing.
+
+    Args:
+        transformer: Patched transformer that may not yet have adapter state.
+    """
+
     if not hasattr(transformer, "_nunchaku_lite_loras"):
         transformer._nunchaku_lite_loras = OrderedDict()
     if not hasattr(transformer, "_nunchaku_lite_lora_base_state"):
@@ -428,6 +648,13 @@ def ensure_lora_runtime(transformer: nn.Module) -> None:
 
 
 def ensure_lora_base_state(transformer: nn.Module) -> None:
+    """Snapshot base low-rank tensors before runtime LoRA composition.
+
+    Args:
+        transformer: Patched transformer whose SVDQ/AWQ modules should be
+            restorable after adapters are disabled or unloaded.
+    """
+
     ensure_lora_runtime(transformer)
     if transformer._nunchaku_lite_lora_base_state is not None:
         return
@@ -450,6 +677,14 @@ def resolve_lora_name(
     path_or_state_dict: str | Path | dict[str, torch.Tensor],
     name: str | None,
 ) -> str:
+    """Choose and validate the adapter name for a newly loaded LoRA.
+
+    Args:
+        transformer: Patched transformer containing existing adapter names.
+        path_or_state_dict: Source used to derive a default name when needed.
+        name: User-provided adapter name, or ``None`` to auto-generate one.
+    """
+
     if name is None:
         if isinstance(path_or_state_dict, (str, Path)):
             name = Path(path_or_state_dict).stem
@@ -461,6 +696,13 @@ def resolve_lora_name(
 
 
 def recompose_loras(transformer: nn.Module) -> None:
+    """Rebuild module LoRA tensors from base state plus all active adapters.
+
+    Args:
+        transformer: Patched transformer whose quantized modules should receive
+            the currently active adapter composition.
+    """
+
     ensure_lora_base_state(transformer)
     modules = lora_modules(transformer)
     active_entries = active_lora_entries(transformer)
@@ -528,14 +770,32 @@ def recompose_loras(transformer: nn.Module) -> None:
 
 
 def svdq_modules(transformer: nn.Module) -> dict[str, SVDQW4A4Linear]:
+    """Return SVDQ W4A4 linear modules addressable by LoRA conversion.
+
+    Args:
+        transformer: Patched transformer to scan by module name.
+    """
+
     return {name: module for name, module in transformer.named_modules() if isinstance(module, SVDQW4A4Linear)}
 
 
 def awq_modules(transformer: nn.Module) -> dict[str, AWQW4A16Linear]:
+    """Return AWQ W4A16 linear modules addressable by LoRA conversion.
+
+    Args:
+        transformer: Patched transformer to scan by module name.
+    """
+
     return {name: module for name, module in transformer.named_modules() if isinstance(module, AWQW4A16Linear)}
 
 
 def lora_modules(transformer: nn.Module) -> dict[str, SVDQW4A4Linear | AWQW4A16Linear]:
+    """Return every quantized linear module that can receive runtime LoRA tensors.
+
+    Args:
+        transformer: Patched transformer to scan by module name.
+    """
+
     modules: dict[str, SVDQW4A4Linear | AWQW4A16Linear] = {}
     modules.update(svdq_modules(transformer))
     modules.update(awq_modules(transformer))
@@ -543,6 +803,12 @@ def lora_modules(transformer: nn.Module) -> dict[str, SVDQW4A4Linear | AWQW4A16L
 
 
 def iter_lora_pairs(state_dict: dict[str, torch.Tensor]) -> list[tuple[str, str]]:
+    """Return matching ``proj_down`` and ``proj_up`` key pairs.
+
+    Args:
+        state_dict: Lite LoRA state dict using ``.proj_down/.proj_up`` keys.
+    """
+
     down_keys = sorted(key for key in state_dict if key.endswith(".proj_down"))
     pairs = []
     for down_key in down_keys:
@@ -554,6 +820,15 @@ def iter_lora_pairs(state_dict: dict[str, torch.Tensor]) -> list[tuple[str, str]
 
 
 def fit_lora_tensor(tensor: torch.Tensor, feature_dim: int, *, down: bool, module_name: str) -> torch.Tensor:
+    """Coerce a LoRA tensor to output-by-rank or input-by-rank module layout.
+
+    Args:
+        tensor: Candidate two-dimensional LoRA tensor.
+        feature_dim: Expected input/output feature size for the target module.
+        down: Whether the tensor is a down projection; used for error labels.
+        module_name: Target module name used in validation errors.
+    """
+
     if tensor.ndim != 2:
         raise ValueError(f"LoRA tensor for {module_name} must be 2D, got shape {tuple(tensor.shape)}.")
 
@@ -568,6 +843,14 @@ def fit_lora_tensor(tensor: torch.Tensor, feature_dim: int, *, down: bool, modul
 
 
 def svdq_down_to_logical(tensor: torch.Tensor, module: SVDQW4A4Linear, module_name: str) -> torch.Tensor:
+    """Convert an SVDQ down tensor to logical rank-by-input layout.
+
+    Args:
+        tensor: Packed or unpacked down tensor.
+        module: Target SVDQ module that provides feature dimensions.
+        module_name: Target module name used in validation errors.
+    """
+
     fitted = fit_lora_tensor(tensor, module.in_features, down=True, module_name=module_name)
     if looks_like_packed_lowrank(fitted, feature_dim=module.in_features):
         return unpack_lowrank_weight(fitted, down=True)
@@ -575,6 +858,14 @@ def svdq_down_to_logical(tensor: torch.Tensor, module: SVDQW4A4Linear, module_na
 
 
 def svdq_up_to_logical(tensor: torch.Tensor, module: SVDQW4A4Linear, module_name: str) -> torch.Tensor:
+    """Convert an SVDQ up tensor to logical output-by-rank layout.
+
+    Args:
+        tensor: Packed or unpacked up tensor.
+        module: Target SVDQ module that provides feature dimensions.
+        module_name: Target module name used in validation errors.
+    """
+
     fitted = fit_lora_tensor(tensor, module.out_features, down=False, module_name=module_name)
     if looks_like_packed_lowrank(fitted, feature_dim=module.out_features):
         return unpack_lowrank_weight(fitted, down=False)
@@ -582,11 +873,24 @@ def svdq_up_to_logical(tensor: torch.Tensor, module: SVDQW4A4Linear, module_name
 
 
 def looks_like_packed_lowrank(tensor: torch.Tensor, feature_dim: int) -> bool:
+    """Return whether a low-rank tensor appears to use Nunchaku packed layout.
+
+    Args:
+        tensor: Candidate low-rank tensor.
+        feature_dim: Expected input/output feature dimension for the module.
+    """
+
     return tensor.shape[0] == feature_dim and feature_dim % 16 == 0 and tensor.shape[1] % 16 == 0
 
 
 def pack_lowrank_weight(weight: torch.Tensor, down: bool) -> torch.Tensor:
-    """Pack a low-rank weight for Nunchaku W4A4 kernels."""
+    """Pack a logical low-rank tensor for Nunchaku W4A4 kernels.
+
+    Args:
+        weight: Logical LoRA tensor, rank-by-input for down projections or
+            output-by-rank for up projections.
+        down: Whether ``weight`` is a down projection.
+    """
 
     if weight.dtype == torch.float32:
         weight = weight.to(torch.bfloat16)
@@ -615,7 +919,12 @@ def pack_lowrank_weight(weight: torch.Tensor, down: bool) -> torch.Tensor:
 
 
 def unpack_lowrank_weight(weight: torch.Tensor, down: bool) -> torch.Tensor:
-    """Unpack a Nunchaku W4A4 low-rank tensor into logical rank-major layout."""
+    """Unpack a Nunchaku W4A4 low-rank tensor into logical layout.
+
+    Args:
+        weight: Packed low-rank tensor stored on an SVDQ module.
+        down: Whether ``weight`` is a down projection.
+    """
 
     channels, rank = weight.shape
     if weight.dtype not in (torch.float16, torch.bfloat16):
@@ -643,6 +952,16 @@ def pad_lora_tensor(
     dim: int | tuple[int, int],
     fill_value: float = 0,
 ) -> torch.Tensor:
+    """Pad selected dimensions of a LoRA tensor to kernel alignment divisors.
+
+    Args:
+        tensor: Tensor to pad.
+        divisor: Divisor or per-dimension divisors the resulting shape must
+            satisfy.
+        dim: Dimension or dimensions to pad.
+        fill_value: Value used for newly allocated padded entries.
+    """
+
     if isinstance(divisor, int):
         divisor = (divisor,)
     if isinstance(dim, int):

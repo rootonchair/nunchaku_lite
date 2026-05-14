@@ -69,7 +69,7 @@ def test_patch_transformer_patches_flux2_from_synthetic_checkpoint(tmp_path):
     assert hasattr(transformer, "_nunchaku_lite_flux2_original_forward")
 
 
-def test_flux2_checkpoint_keys_match_lite_module_names():
+def test_flux2_checkpoint_keys_match_nunchaku_module_names():
     transformer = make_tiny_flux2_transformer()
     Flux2Adapter().patch(
         transformer,

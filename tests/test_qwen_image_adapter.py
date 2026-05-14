@@ -83,7 +83,7 @@ def test_patch_transformer_patches_qwen_image_from_synthetic_fp4_checkpoint(tmp_
     assert block.txt_mlp.net[0].proj.precision == "nvfp4"
 
 
-def test_qwen_image_checkpoint_keys_match_lite_module_names():
+def test_qwen_image_checkpoint_keys_match_nunchaku_module_names():
     transformer = make_tiny_qwen_image_transformer()
     patch_tiny_qwen_image(transformer)
     keys = transformer.state_dict().keys()

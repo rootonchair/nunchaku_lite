@@ -91,7 +91,7 @@ if __name__ == "__main__":
         long_description = readme_file.read()
 
     include_dirs = [
-        here("nunchaku_lite/csrc"),
+        here("src/nunchaku_lite/csrc"),
         native("src"),
         native("third_party/spdlog/include"),
     ]
@@ -129,7 +129,7 @@ if __name__ == "__main__":
     extension = CUDAExtension(
         name="nunchaku_lite._C",
         sources=[
-            "nunchaku_lite/csrc/pybind.cpp",
+            "src/nunchaku_lite/csrc/pybind.cpp",
             native_source("src/interop/torch.cpp"),
             native_source("src/kernels/zgemm/gemm_w4a4.cu"),
             native_source("src/kernels/zgemm/gemm_w4a4_launch_fp16_int4.cu"),
@@ -165,7 +165,8 @@ if __name__ == "__main__":
             "Programming Language :: Python :: 3.13",
         ],
         python_requires=">=3.10",
-        packages=setuptools.find_packages(include=["nunchaku_lite", "nunchaku_lite.*"]),
+        package_dir={"": "src"},
+        packages=setuptools.find_packages(where="src", include=["nunchaku_lite", "nunchaku_lite.*"]),
         install_requires=["torch>=2.7", "diffusers>=0.36", "safetensors", "huggingface-hub>=0.34"],
         ext_modules=[extension],
         cmdclass={"build_ext": CustomBuildExtension},

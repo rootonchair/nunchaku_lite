@@ -819,10 +819,9 @@ class FluxAdapter:
     ) -> None:
         """Attach Flux pipeline-level runtime APIs."""
 
-        from ..lora.base import bind_pipeline_lora_methods
-        from ..lora.flux import NunchakuFluxPipelineLoraMixin
+        from ..lora.base import NunchakuPipelineLoraMixin, bind_pipeline_lora_methods
 
-        bind_pipeline_lora_methods(pipeline, NunchakuFluxPipelineLoraMixin)
+        bind_pipeline_lora_methods(pipeline, NunchakuPipelineLoraMixin)
 
     def _patch_transformer(self, transformer: torch.nn.Module, context: SVDQPatchContext) -> None:
         """Patch Flux block modules through one recursive transformer traversal.

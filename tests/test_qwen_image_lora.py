@@ -3,11 +3,7 @@ from types import MethodType, SimpleNamespace
 import pytest
 import torch
 
-from nunchaku_lite.lora.base import bind_pipeline_lora_methods, unpack_lowrank_weight
-from nunchaku_lite.lora.qwen_image import (
-    NunchakuQwenImagePipelineLoraMixin,
-    convert_qwen_image_lora_to_lite,
-)
+from nunchaku_lite.lora.base import NunchakuPipelineLoraMixin, bind_pipeline_lora_methods, unpack_lowrank_weight
 
 from test_qwen_image_adapter import make_tiny_qwen_image_transformer, patch_tiny_qwen_image
 
@@ -37,7 +33,7 @@ def test_qwen_image_lora_methods_are_bound_after_patch():
     assert transformer._nunchaku_lite_lora_enabled is True
 
 
-def test_convert_lightx2v_qwen_qkv_lora_to_lite_fused_projection():
+def test_convert_lightx2v_qwen_qkv_lora_to_nunchaku_fused_projection():
     transformer = make_patched_qwen_image_transformer(rank=4)
     module = transformer.get_submodule("transformer_blocks.0.attn.to_qkv")
     rank = 2
@@ -52,7 +48,7 @@ def test_convert_lightx2v_qwen_qkv_lora_to_lite_fused_projection():
         )
         lora[f"{base}.alpha"] = torch.tensor(float(rank), dtype=torch.bfloat16)
 
-    converted = convert_qwen_image_lora_to_lite(lora, transformer)
+    converted = transformer._convert_lora_to_nunchaku(lora)
 
     assert set(converted) == {
         "transformer_blocks.0.attn.to_qkv.proj_down",
@@ -62,7 +58,7 @@ def test_convert_lightx2v_qwen_qkv_lora_to_lite_fused_projection():
     assert converted["transformer_blocks.0.attn.to_qkv.proj_up"].shape[0] == module.out_features
 
 
-def test_convert_qwen_add_qkv_and_direct_mlp_lora_to_lite():
+def test_convert_qwen_add_qkv_and_direct_mlp_lora_to_nunchaku():
     transformer = make_patched_qwen_image_transformer(rank=4)
     add_module = transformer.get_submodule("transformer_blocks.0.attn.add_qkv_proj")
     mlp_name = "transformer_blocks.0.img_mlp.net.2"
@@ -76,7 +72,7 @@ def test_convert_qwen_add_qkv_and_direct_mlp_lora_to_lite():
     lora[f"transformer.{mlp_name}.lora_A.weight"] = torch.ones(rank, mlp_module.in_features, dtype=torch.bfloat16)
     lora[f"transformer.{mlp_name}.lora_B.weight"] = torch.ones(mlp_module.out_features, rank, dtype=torch.bfloat16)
 
-    converted = convert_qwen_image_lora_to_lite(lora, transformer)
+    converted = transformer._convert_lora_to_nunchaku(lora)
 
     assert "transformer_blocks.0.attn.add_qkv_proj.proj_down" in converted
     assert "transformer_blocks.0.attn.add_qkv_proj.proj_up" in converted
@@ -140,7 +136,7 @@ def test_qwen_pipeline_lora_mixin_maps_diffusers_api_to_transformer_runtime():
         return state_dict
 
     pipeline.lora_state_dict = MethodType(lora_state_dict, pipeline)
-    bind_pipeline_lora_methods(pipeline, NunchakuQwenImagePipelineLoraMixin)
+    bind_pipeline_lora_methods(pipeline, NunchakuPipelineLoraMixin)
 
     pipeline.load_lora_weights(lora, adapter_name="lightning")
 

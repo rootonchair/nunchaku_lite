@@ -583,10 +583,9 @@ class QwenImageAdapter:
     ) -> None:
         """Attach Qwen-Image pipeline-level runtime APIs."""
 
-        from ..lora.base import bind_pipeline_lora_methods
-        from ..lora.qwen_image import NunchakuQwenImagePipelineLoraMixin
+        from ..lora.base import NunchakuPipelineLoraMixin, bind_pipeline_lora_methods
 
-        bind_pipeline_lora_methods(pipeline, NunchakuQwenImagePipelineLoraMixin)
+        bind_pipeline_lora_methods(pipeline, NunchakuPipelineLoraMixin)
 
     def _patch_transformer(self, transformer: torch.nn.Module, context: SVDQPatchContext) -> None:
         """Patch Qwen transformer blocks through one recursive traversal.

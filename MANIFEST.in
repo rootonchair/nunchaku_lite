@@ -1,5 +1,5 @@
-recursive-include nunchaku_lite *.py *.json
-recursive-include nunchaku_lite/csrc *.cpp *.h *.hpp *.ipp *.cu *.cuh
+recursive-include src/nunchaku_lite *.py *.json
+recursive-include src/nunchaku_lite/csrc *.cpp *.h *.hpp *.ipp *.cu *.cuh
 recursive-include native/src *.cpp *.h *.hpp *.ipp *.cu *.cuh
 recursive-include native/third_party/cutlass/include *.cpp *.h *.hpp *.ipp *.cu *.cuh
 recursive-include native/third_party/json/include *.cpp *.h *.hpp *.ipp
