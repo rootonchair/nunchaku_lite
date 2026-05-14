@@ -143,32 +143,25 @@ def run_original(args: argparse.Namespace, output_dir: Path, pipeline_cls, torch
 
 
 def run_lite(args: argparse.Namespace, output_dir: Path, pipeline_cls, torch_dtype: torch.dtype) -> dict:
-    from nunchaku_lite import patch_transformer
+    from nunchaku_lite import load_nunchaku_pipeline
 
     cleanup()
-    print("loading base Flux2 Klein pipeline for nunchaku_lite", flush=True)
+    print("loading nunchaku_lite Flux2 Klein pipeline", flush=True)
     pipe, load_seconds = timed_cuda_call(
-        lambda: pipeline_cls.from_pretrained(
+        lambda: load_nunchaku_pipeline(
             args.model_id,
-            torch_dtype=torch_dtype,
-            low_cpu_mem_usage=args.low_cpu_mem_usage,
-        )
-    )
-    print("patching transformer with nunchaku_lite Flux2", flush=True)
-    _, patch_seconds = timed_cuda_call(
-        lambda: patch_transformer(
-            pipe.transformer,
-            args.checkpoint,
+            pipeline_cls=pipeline_cls,
+            checkpoint=args.checkpoint,
             target="flux2",
             precision=args.precision,
             torch_dtype=torch_dtype,
             device="cuda",
+            low_cpu_mem_usage=args.low_cpu_mem_usage,
         )
     )
     pipe = pipe.to("cuda")
     result = run_generation(pipe, args, "nunchaku_lite", output_dir)
     result["load_seconds"] = load_seconds
-    result["patch_seconds"] = patch_seconds
     del pipe
     cleanup()
     return result

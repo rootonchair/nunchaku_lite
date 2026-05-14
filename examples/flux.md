@@ -12,7 +12,7 @@ from pathlib import Path
 import torch
 from diffusers import FluxPipeline
 
-from nunchaku_lite import patch_transformer
+from nunchaku_lite import load_nunchaku_pipeline
 
 
 model_id = "black-forest-labs/FLUX.1-schnell"
@@ -24,10 +24,10 @@ checkpoints = {
 checkpoint = checkpoints[precision]
 output_path = Path(f"outputs/flux_schnell_nunchaku_lite_{precision}.png")
 
-pipe = FluxPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
-patch_transformer(
-    pipe.transformer,
-    checkpoint,
+pipe = load_nunchaku_pipeline(
+    model_id,
+    pipeline_cls=FluxPipeline,
+    checkpoint=checkpoint,
     target="flux",
     precision=precision,
     torch_dtype=torch.bfloat16,
@@ -63,7 +63,7 @@ from pathlib import Path
 import torch
 from diffusers import FluxPipeline
 
-from nunchaku_lite import patch_transformer
+from nunchaku_lite import load_nunchaku_pipeline
 
 
 model_id = "black-forest-labs/FLUX.1-dev"
@@ -73,22 +73,22 @@ checkpoints = {
     "fp4": "nunchaku-tech/nunchaku-flux.1-dev/svdq-fp4_r32-flux.1-dev.safetensors",
 }
 
-pipe = FluxPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
-patch_transformer(
-    pipe.transformer,
-    checkpoints[precision],
+pipe = load_nunchaku_pipeline(
+    model_id,
+    pipeline_cls=FluxPipeline,
+    checkpoint=checkpoints[precision],
     target="flux",
     precision=precision,
     torch_dtype=torch.bfloat16,
 )
 pipe.enable_model_cpu_offload()
 
-pipe.transformer.load_lora(
-    "aleksa-codes/flux-ghibsky-illustration/lora.safetensors",
-    strength=0.9,
-    name="ghibsky",
+pipe.load_lora_weights(
+    "aleksa-codes/flux-ghibsky-illustration",
+    weight_name="lora.safetensors",
+    adapter_name="ghibsky",
 )
-pipe.transformer.set_lora_strength(0.75, name="ghibsky")
+pipe.set_adapters("ghibsky", adapter_weights=0.75)
 
 image = pipe(
     "GHIBSKY style painting of a cozy mountain cabin beside a clear lake at sunset",
@@ -103,7 +103,7 @@ output_path = Path(f"outputs/flux_dev_ghibsky_{precision}.png")
 output_path.parent.mkdir(parents=True, exist_ok=True)
 image.save(output_path)
 
-pipe.transformer.reset_lora()
+pipe.unload_lora_weights()
 ```
 
 ### Multiple LoRAs
@@ -112,18 +112,19 @@ Load each adapter with a stable name, then update or remove one without
 disturbing the others.
 
 ```python
-pipe.transformer.load_lora(
-    "aleksa-codes/flux-ghibsky-illustration/lora.safetensors",
-    strength=0.65,
-    name="ghibsky",
+pipe.load_lora_weights(
+    "aleksa-codes/flux-ghibsky-illustration",
+    weight_name="lora.safetensors",
+    adapter_name="ghibsky",
 )
-pipe.transformer.load_lora(
-    "prithivMLmods/Canopus-LoRA-Flux-UltraRealism-2.0/Canopus-LoRA-Flux-UltraRealism.safetensors",
-    strength=0.35,
-    name="realism",
+pipe.load_lora_weights(
+    "prithivMLmods/Canopus-LoRA-Flux-UltraRealism-2.0",
+    weight_name="Canopus-LoRA-Flux-UltraRealism.safetensors",
+    adapter_name="realism",
 )
 
-pipe.transformer.set_lora_strength(0.5, name="realism")
-pipe.transformer.reset_lora("realism")  # leaves "ghibsky" active
-pipe.transformer.reset_lora()  # removes all runtime LoRAs
+pipe.set_adapters(["ghibsky", "realism"], adapter_weights=[0.65, 0.35])
+pipe.set_adapters(["ghibsky", "realism"], adapter_weights=[0.65, 0.5])
+pipe.delete_adapters("realism")  # leaves "ghibsky" loaded and active
+pipe.unload_lora_weights()  # removes all runtime LoRAs
 ```

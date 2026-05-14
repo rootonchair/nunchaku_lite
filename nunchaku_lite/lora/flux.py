@@ -23,11 +23,193 @@ LORA_B_SUFFIX = ".lora_B.weight"
 def bind_flux_lora_methods(transformer: nn.Module) -> None:
     """Attach runtime LoRA methods to a patched Flux transformer."""
 
-    transformer.load_lora = MethodType(_load_lora, transformer)
-    transformer.set_lora_strength = MethodType(_set_lora_strength, transformer)
-    transformer.reset_lora = MethodType(_reset_lora, transformer)
-    transformer._nunchaku_lite_loras = OrderedDict()
-    transformer._nunchaku_lite_lora_base_state = None
+    _bind_mixin_methods(
+        transformer,
+        NunchakuFluxTransformerLoraMixin,
+        (
+            "load_lora",
+            "load_lora_adapter",
+            "set_lora_strength",
+            "set_adapters",
+            "reset_lora",
+            "delete_adapters",
+            "unload_lora",
+            "enable_lora",
+            "disable_lora",
+            "get_list_adapters",
+            "get_active_adapters",
+            "fuse_lora",
+        ),
+    )
+    _ensure_lora_runtime(transformer)
+
+
+def bind_flux_pipeline_lora_methods(pipeline) -> None:
+    """Attach Diffusers-compatible runtime LoRA methods to a Flux pipeline."""
+
+    _bind_mixin_methods(
+        pipeline,
+        NunchakuFluxPipelineLoraMixin,
+        (
+            "load_lora_weights",
+            "set_adapters",
+            "delete_adapters",
+            "unload_lora_weights",
+            "enable_lora",
+            "disable_lora",
+            "get_list_adapters",
+            "get_active_adapters",
+            "fuse_lora",
+            "unfuse_lora",
+        ),
+    )
+    pipeline._nunchaku_lite_lora_pipeline_api_bound = True
+
+
+def _bind_mixin_methods(instance, mixin_cls: type, method_names: tuple[str, ...]) -> None:
+    for method_name in method_names:
+        setattr(instance, method_name, MethodType(getattr(mixin_cls, method_name), instance))
+
+
+class NunchakuFluxTransformerLoraMixin:
+    """Mixin-style method provider for quantized FLUX transformer LoRA runtime."""
+
+    def load_lora(
+        self,
+        path_or_state_dict: str | Path | dict[str, torch.Tensor],
+        *,
+        strength: float = 1.0,
+        name: str | None = None,
+        replace: bool = False,
+    ) -> str:
+        return _load_lora(self, path_or_state_dict, strength=strength, name=name, replace=replace)
+
+    def load_lora_adapter(
+        self,
+        pretrained_model_name_or_path_or_dict,
+        prefix: str = "transformer",
+        hotswap: bool = False,
+        **kwargs,
+    ) -> str:
+        if hotswap:
+            raise NotImplementedError("nunchaku_lite FLUX runtime LoRA does not support PEFT hotswap.")
+        adapter_name = kwargs.pop("adapter_name", None)
+        network_alphas = kwargs.pop("network_alphas", None)
+        kwargs.pop("metadata", None)
+        kwargs.pop("_pipeline", None)
+        kwargs.pop("low_cpu_mem_usage", None)
+        state_dict = _strip_component_prefixes(dict(pretrained_model_name_or_path_or_dict), prefix=prefix)
+        if network_alphas:
+            state_dict.update(network_alphas)
+        _raise_if_text_encoder_lora(state_dict)
+        return self.load_lora(state_dict, name=adapter_name)
+
+    def set_lora_strength(self, strength: float = 1.0, name: str | None = None) -> None:
+        _set_lora_strength(self, strength=strength, name=name)
+
+    def set_adapters(self, adapter_names: list[str] | str, weights=None) -> None:
+        _set_active_adapters(self, adapter_names, weights)
+
+    def reset_lora(self, name: str | None = None) -> None:
+        _reset_lora(self, name=name)
+
+    def delete_adapters(self, adapter_names: list[str] | str) -> None:
+        if isinstance(adapter_names, str):
+            adapter_names = [adapter_names]
+        for adapter_name in adapter_names:
+            self.reset_lora(adapter_name)
+
+    def unload_lora(self) -> None:
+        self.reset_lora()
+
+    def enable_lora(self) -> None:
+        _ensure_lora_runtime(self)
+        self._nunchaku_lite_lora_enabled = True
+        _recompose_loras(self)
+
+    def disable_lora(self) -> None:
+        _ensure_lora_runtime(self)
+        self._nunchaku_lite_lora_enabled = False
+        _recompose_loras(self)
+
+    def get_list_adapters(self) -> list[str]:
+        _ensure_lora_runtime(self)
+        return list(self._nunchaku_lite_loras)
+
+    def get_active_adapters(self) -> list[str]:
+        return _active_lora_names(self)
+
+    def fuse_lora(self, *args, **kwargs) -> None:
+        raise NotImplementedError("nunchaku_lite FLUX runtime LoRA keeps adapters as low-rank branches.")
+
+
+class NunchakuFluxPipelineLoraMixin:
+    """Mixin-style method provider for Diffusers-compatible FLUX pipeline LoRA APIs."""
+
+    def load_lora_weights(
+        self,
+        pretrained_model_name_or_path_or_dict: str | dict[str, torch.Tensor],
+        adapter_name: str | None = None,
+        hotswap: bool = False,
+        **kwargs,
+    ) -> None:
+        if hotswap:
+            raise NotImplementedError("nunchaku_lite FLUX runtime LoRA does not support PEFT hotswap.")
+        transformer = _pipeline_transformer(self)
+        _ensure_lora_runtime(transformer)
+        kwargs["return_lora_metadata"] = True
+        state_dict, network_alphas, _metadata = self.lora_state_dict(
+            pretrained_model_name_or_path_or_dict,
+            return_alphas=True,
+            **kwargs,
+        )
+        _raise_if_text_encoder_lora(state_dict)
+        transformer_state = {
+            key: value
+            for key, value in state_dict.items()
+            if key.startswith(("transformer.", "base_model.model.transformer."))
+        }
+        if not transformer_state:
+            transformer_state = state_dict
+        if network_alphas:
+            transformer_state = dict(transformer_state)
+            transformer_state.update(network_alphas)
+        transformer.load_lora(transformer_state, name=adapter_name)
+
+    def set_adapters(
+        self,
+        adapter_names: list[str] | str,
+        adapter_weights: float | dict | list[float] | list[dict] | None = None,
+    ) -> None:
+        transformer = _pipeline_transformer(self)
+        weights = _transformer_adapter_weights(adapter_names, adapter_weights)
+        transformer.set_adapters(adapter_names, weights)
+
+    def delete_adapters(self, adapter_names: list[str] | str) -> None:
+        _pipeline_transformer(self).delete_adapters(adapter_names)
+
+    def unload_lora_weights(self, reset_to_overwritten_params: bool = False) -> None:
+        if reset_to_overwritten_params:
+            raise NotImplementedError("nunchaku_lite FLUX runtime LoRA does not overwrite dense transformer params.")
+        _pipeline_transformer(self).unload_lora()
+
+    def enable_lora(self) -> None:
+        _pipeline_transformer(self).enable_lora()
+
+    def disable_lora(self) -> None:
+        _pipeline_transformer(self).disable_lora()
+
+    def get_list_adapters(self) -> dict[str, list[str]]:
+        return {"transformer": _pipeline_transformer(self).get_list_adapters()}
+
+    def get_active_adapters(self) -> list[str]:
+        return _pipeline_transformer(self).get_active_adapters()
+
+    def fuse_lora(self, *args, **kwargs) -> None:
+        raise NotImplementedError("nunchaku_lite FLUX runtime LoRA does not support fusing into quantized weights.")
+
+    def unfuse_lora(self, *args, **kwargs) -> None:
+        raise NotImplementedError("nunchaku_lite FLUX runtime LoRA does not support fusing into quantized weights.")
 
 
 def is_nunchaku_flux_lora(state_dict: dict[str, torch.Tensor]) -> bool:
@@ -63,11 +245,16 @@ def _load_lora(
     _ensure_lora_base_state(transformer)
     if replace:
         transformer._nunchaku_lite_loras.clear()
+        transformer._nunchaku_lite_active_loras.clear()
 
     lora_name = _resolve_lora_name(transformer, path_or_state_dict, name)
     converted = convert_flux_lora_to_lite(path_or_state_dict, transformer)
     converted = {key: value.detach().cpu() for key, value in converted.items()}
     transformer._nunchaku_lite_loras[lora_name] = {"state_dict": converted, "strength": float(strength)}
+    transformer._nunchaku_lite_active_loras = [
+        active_name for active_name in transformer._nunchaku_lite_active_loras if active_name != lora_name
+    ]
+    transformer._nunchaku_lite_active_loras.append(lora_name)
     _recompose_loras(transformer)
     return lora_name
 
@@ -79,13 +266,14 @@ def _set_lora_strength(transformer: nn.Module, strength: float = 1.0, name: str 
     if not transformer._nunchaku_lite_loras:
         return
     if name is None:
-        if len(transformer._nunchaku_lite_loras) != 1:
+        active_names = _active_lora_names(transformer)
+        if len(active_names) != 1:
             raise ValueError("Multiple LoRAs are active; pass name=... to set one strength.")
-        name = next(iter(transformer._nunchaku_lite_loras))
+        name = active_names[0]
     try:
         transformer._nunchaku_lite_loras[name]["strength"] = float(strength)
     except KeyError as exc:
-        raise ValueError(f"No active LoRA named {name!r}.") from exc
+        raise ValueError(f"No loaded LoRA named {name!r}.") from exc
     _recompose_loras(transformer)
 
 
@@ -95,11 +283,15 @@ def _reset_lora(transformer: nn.Module, name: str | None = None) -> None:
     _ensure_lora_runtime(transformer)
     if name is None:
         transformer._nunchaku_lite_loras.clear()
+        transformer._nunchaku_lite_active_loras.clear()
     else:
         try:
             del transformer._nunchaku_lite_loras[name]
         except KeyError as exc:
-            raise ValueError(f"No active LoRA named {name!r}.") from exc
+            raise ValueError(f"No loaded LoRA named {name!r}.") from exc
+        transformer._nunchaku_lite_active_loras = [
+            active_name for active_name in transformer._nunchaku_lite_active_loras if active_name != name
+        ]
     _recompose_loras(transformer)
 
 
@@ -109,11 +301,100 @@ def _load_lora_state_dict(path_or_state_dict: str | Path | dict[str, torch.Tenso
     return load_state_dict_in_safetensors(path_or_state_dict)
 
 
+def _pipeline_transformer(pipeline) -> nn.Module:
+    transformer = getattr(pipeline, "transformer", None)
+    if transformer is None:
+        transformer_name = getattr(pipeline, "transformer_name", "transformer")
+        transformer = getattr(pipeline, transformer_name)
+    if not hasattr(transformer, "load_lora"):
+        bind_flux_lora_methods(transformer)
+    return transformer
+
+
+def _strip_component_prefixes(state_dict: dict[str, torch.Tensor], prefix: str = "transformer") -> dict[str, torch.Tensor]:
+    prefixes = (
+        f"{prefix}.",
+        f"base_model.model.{prefix}.",
+    )
+    stripped = {}
+    for key, value in state_dict.items():
+        new_key = key
+        for current_prefix in prefixes:
+            if new_key.startswith(current_prefix):
+                new_key = new_key[len(current_prefix) :]
+                break
+        stripped[new_key] = value
+    return stripped
+
+
+def _raise_if_text_encoder_lora(state_dict: dict[str, torch.Tensor]) -> None:
+    text_keys = [
+        key
+        for key in state_dict
+        if key.startswith(("text_encoder.", "text_encoder_2.", "base_model.model.text_encoder."))
+    ]
+    if text_keys:
+        sample = ", ".join(text_keys[:5])
+        raise NotImplementedError(
+            "nunchaku_lite FLUX runtime LoRA supports transformer LoRA weights only; "
+            f"text encoder LoRA keys are not supported: {sample}"
+        )
+
+
+def _transformer_adapter_weights(adapter_names, adapter_weights):
+    if isinstance(adapter_weights, dict):
+        return adapter_weights.get("transformer")
+    if isinstance(adapter_weights, list):
+        return [
+            weight.get("transformer") if isinstance(weight, dict) else weight
+            for weight in adapter_weights
+        ]
+    return adapter_weights
+
+
+def _set_active_adapters(transformer: nn.Module, adapter_names: list[str] | str, weights=None) -> None:
+    _ensure_lora_runtime(transformer)
+    adapter_names = [adapter_names] if isinstance(adapter_names, str) else list(adapter_names)
+    if not isinstance(weights, list):
+        weights = [weights] * len(adapter_names)
+    if len(adapter_names) != len(weights):
+        raise ValueError(
+            f"Length of adapter names {len(adapter_names)} is not equal to the length of the weights {len(weights)}."
+        )
+
+    missing = [name for name in adapter_names if name not in transformer._nunchaku_lite_loras]
+    if missing:
+        loaded = set(transformer._nunchaku_lite_loras)
+        raise ValueError(f"Adapter name(s) {set(missing)} not in the list of present adapters: {loaded}.")
+
+    transformer._nunchaku_lite_active_loras = list(adapter_names)
+    for adapter_name, weight in zip(adapter_names, weights):
+        if isinstance(weight, dict):
+            weight = weight.get("transformer", 1.0)
+        transformer._nunchaku_lite_loras[adapter_name]["strength"] = 1.0 if weight is None else float(weight)
+    _recompose_loras(transformer)
+
+
+def _active_lora_names(transformer: nn.Module) -> list[str]:
+    _ensure_lora_runtime(transformer)
+    if not transformer._nunchaku_lite_lora_enabled:
+        return []
+    return [name for name in transformer._nunchaku_lite_active_loras if name in transformer._nunchaku_lite_loras]
+
+
+def _active_lora_entries(transformer: nn.Module) -> list[dict]:
+    return [transformer._nunchaku_lite_loras[name] for name in _active_lora_names(transformer)]
+
+
 def _ensure_lora_runtime(transformer: nn.Module) -> None:
     if not hasattr(transformer, "_nunchaku_lite_loras"):
         transformer._nunchaku_lite_loras = OrderedDict()
     if not hasattr(transformer, "_nunchaku_lite_lora_base_state"):
         transformer._nunchaku_lite_lora_base_state = None
+    if not hasattr(transformer, "_nunchaku_lite_active_loras"):
+        transformer._nunchaku_lite_active_loras = list(transformer._nunchaku_lite_loras)
+    if not hasattr(transformer, "_nunchaku_lite_lora_enabled"):
+        transformer._nunchaku_lite_lora_enabled = True
 
 
 def _ensure_lora_base_state(transformer: nn.Module) -> None:
@@ -152,18 +433,19 @@ def _resolve_lora_name(
 def _recompose_loras(transformer: nn.Module) -> None:
     _ensure_lora_base_state(transformer)
     modules = _lora_modules(transformer)
+    active_entries = _active_lora_entries(transformer)
 
     for name, module in modules.items():
         if isinstance(module, SVDQW4A4Linear):
             base_down = transformer._nunchaku_lite_lora_base_state[f"{name}.proj_down"]
             base_up = transformer._nunchaku_lite_lora_base_state[f"{name}.proj_up"]
-            if not transformer._nunchaku_lite_loras:
+            if not active_entries:
                 down = base_down.to(device=module.proj_down.device, dtype=module.proj_down.dtype)
                 up = base_up.to(device=module.proj_up.device, dtype=module.proj_up.dtype)
             else:
                 logical_downs = [_svdq_down_to_logical(base_down, module, name)]
                 logical_ups = [_svdq_up_to_logical(base_up, module, name)]
-                for entry in transformer._nunchaku_lite_loras.values():
+                for entry in active_entries:
                     state_dict = entry["state_dict"]
                     down_key = f"{name}.proj_down"
                     up_key = f"{name}.proj_up"
@@ -190,7 +472,7 @@ def _recompose_loras(transformer: nn.Module) -> None:
         else:
             down = transformer._nunchaku_lite_lora_base_state[f"{name}.proj_down"]
             up = transformer._nunchaku_lite_lora_base_state[f"{name}.proj_up"]
-            for entry in transformer._nunchaku_lite_loras.values():
+            for entry in active_entries:
                 state_dict = entry["state_dict"]
                 down_key = f"{name}.proj_down"
                 up_key = f"{name}.proj_up"

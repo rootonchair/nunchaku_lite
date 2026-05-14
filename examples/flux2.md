@@ -12,7 +12,7 @@ from pathlib import Path
 import torch
 from diffusers import Flux2KleinPipeline
 
-from nunchaku_lite import patch_transformer
+from nunchaku_lite import load_nunchaku_pipeline
 
 
 model_id = "tonera/FLUX.2-klein-9B-Nunchaku"
@@ -24,16 +24,16 @@ checkpoints = {
 checkpoint = checkpoints[precision]
 output_path = Path(f"outputs/flux2_klein_nunchaku_lite_{precision}.png")
 
-pipe = Flux2KleinPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
-patch_transformer(
-    pipe.transformer,
-    checkpoint,
+pipe = load_nunchaku_pipeline(
+    model_id,
+    pipeline_cls=Flux2KleinPipeline,
+    checkpoint=checkpoint,
     target="flux2",
     precision=precision,
     torch_dtype=torch.bfloat16,
     device="cuda",
 )
-pipe = pipe.to("cuda")
+pipe.enable_model_cpu_offload()
 
 image = pipe(
     prompt="A cat holding a sign that says hello world",

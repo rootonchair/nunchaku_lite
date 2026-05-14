@@ -1,5 +1,5 @@
 import json
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 import torch
@@ -7,7 +7,7 @@ from safetensors.torch import save_file
 
 from nunchaku_lite import patch_transformer
 from nunchaku_lite.adapters.flux import FluxAdapter
-from nunchaku_lite.lora.flux import convert_flux_lora_to_lite, unpack_lowrank_weight
+from nunchaku_lite.lora.flux import bind_flux_pipeline_lora_methods, convert_flux_lora_to_lite, unpack_lowrank_weight
 
 from test_flux_adapter import make_tiny_flux_transformer
 
@@ -43,9 +43,12 @@ def test_flux_lora_methods_are_bound_after_patch(tmp_path):
     transformer = make_patched_flux_transformer(tmp_path)
 
     assert callable(transformer.load_lora)
+    assert callable(transformer.load_lora_adapter)
     assert callable(transformer.set_lora_strength)
     assert callable(transformer.reset_lora)
     assert transformer._nunchaku_lite_loras == {}
+    assert transformer._nunchaku_lite_active_loras == []
+    assert transformer._nunchaku_lite_lora_enabled is True
 
 
 def test_load_nunchaku_lora_composes_strength_and_reset(tmp_path):
@@ -76,6 +79,7 @@ def test_load_nunchaku_lora_composes_strength_and_reset(tmp_path):
     assert torch.equal(module.proj_down, base_down)
     assert torch.equal(module.proj_up, base_up)
     assert transformer._nunchaku_lite_loras == {}
+    assert transformer.get_active_adapters() == []
 
 
 def test_set_named_lora_strength_recomposes_from_baseline(tmp_path):
@@ -104,10 +108,54 @@ def test_set_named_lora_strength_recomposes_from_baseline(tmp_path):
     transformer.reset_lora("first")
 
     assert list(transformer._nunchaku_lite_loras) == ["second"]
+    assert transformer.get_active_adapters() == ["second"]
     logical_down = unpack_lowrank_weight(module.proj_down.detach(), down=True)
     assert module.proj_down.shape[1] == 16
     assert torch.allclose(logical_down[4:5], torch.full_like(logical_down[4:5], 1.5))
     assert torch.count_nonzero(logical_down[5:]) == 0
+
+
+def test_transformer_set_adapters_disable_enable_and_delete(tmp_path):
+    transformer = make_patched_flux_transformer(tmp_path, rank=4)
+    module_name = "transformer_blocks.0.attn.to_out.0"
+    module = transformer.get_submodule(module_name)
+    base_down = module.proj_down.detach().clone()
+    first = {
+        f"{module_name}.proj_down": torch.ones(module.in_features, 1, dtype=torch.bfloat16),
+        f"{module_name}.proj_up": torch.ones(module.out_features, 1, dtype=torch.bfloat16),
+    }
+    second = {
+        f"{module_name}.proj_down": torch.full((module.in_features, 1), 3.0, dtype=torch.bfloat16),
+        f"{module_name}.proj_up": torch.ones(module.out_features, 1, dtype=torch.bfloat16),
+    }
+
+    transformer.load_lora(first, strength=1.0, name="first")
+    transformer.load_lora(second, strength=1.0, name="second")
+    transformer.set_adapters(["second"], weights=[0.25])
+
+    logical_down = unpack_lowrank_weight(module.proj_down.detach(), down=True)
+    assert transformer.get_list_adapters() == ["first", "second"]
+    assert transformer.get_active_adapters() == ["second"]
+    assert torch.allclose(logical_down[4:5], torch.full_like(logical_down[4:5], 0.75))
+    assert torch.count_nonzero(logical_down[5:]) == 0
+
+    transformer.disable_lora()
+    assert transformer.get_active_adapters() == []
+    assert torch.equal(module.proj_down, base_down)
+
+    transformer.enable_lora()
+    assert transformer.get_active_adapters() == ["second"]
+    logical_down = unpack_lowrank_weight(module.proj_down.detach(), down=True)
+    assert torch.allclose(logical_down[4:5], torch.full_like(logical_down[4:5], 0.75))
+
+    transformer.delete_adapters("second")
+    assert transformer.get_list_adapters() == ["first"]
+    assert transformer.get_active_adapters() == []
+    assert torch.equal(module.proj_down, base_down)
+
+    transformer.unload_lora()
+    assert transformer.get_list_adapters() == []
+    assert torch.equal(module.proj_down, base_down)
 
 
 def test_load_diffusers_adanorm_lora_sets_awq_side_branch(tmp_path):
@@ -187,3 +235,80 @@ def test_unsupported_flux_lora_target_raises(tmp_path):
 
     with pytest.raises(ValueError, match="Unsupported Flux LoRA target"):
         transformer.load_lora(lora)
+
+
+def test_pipeline_lora_mixin_maps_diffusers_api_to_transformer_runtime(tmp_path):
+    transformer = make_patched_flux_transformer(tmp_path, rank=4)
+    module_name = "transformer_blocks.0.attn.to_out.0"
+    module = transformer.get_submodule(module_name)
+    base_down = module.proj_down.detach().clone()
+    lora = {
+        f"transformer.{module_name}.lora_A.weight": torch.ones(1, module.in_features, dtype=torch.bfloat16),
+        f"transformer.{module_name}.lora_B.weight": torch.ones(module.out_features, 1, dtype=torch.bfloat16),
+    }
+
+    pipeline = SimpleNamespace(transformer=transformer)
+
+    def lora_state_dict(self, state_dict, return_alphas=False, **kwargs):
+        metadata = {"format": "test"}
+        if return_alphas and kwargs.get("return_lora_metadata"):
+            return state_dict, {}, metadata
+        if return_alphas:
+            return state_dict, {}
+        return state_dict
+
+    pipeline.lora_state_dict = MethodType(lora_state_dict, pipeline)
+    bind_flux_pipeline_lora_methods(pipeline)
+
+    pipeline.load_lora_weights(lora, adapter_name="style")
+
+    assert pipeline.get_list_adapters() == {"transformer": ["style"]}
+    assert pipeline.get_active_adapters() == ["style"]
+    assert module.proj_down.shape[1] == 32
+
+    pipeline.set_adapters("style", adapter_weights=0.5)
+    logical_down = unpack_lowrank_weight(module.proj_down.detach(), down=True)
+    assert torch.allclose(logical_down[4:5], torch.full_like(logical_down[4:5], 0.5))
+
+    pipeline.disable_lora()
+    assert pipeline.get_active_adapters() == []
+    assert torch.equal(module.proj_down, base_down)
+
+    pipeline.enable_lora()
+    assert pipeline.get_active_adapters() == ["style"]
+
+    pipeline.delete_adapters("style")
+    assert pipeline.get_list_adapters() == {"transformer": []}
+    assert torch.equal(module.proj_down, base_down)
+
+    pipeline.load_lora_weights(lora, adapter_name="style")
+    pipeline.unload_lora_weights()
+    assert pipeline.get_list_adapters() == {"transformer": []}
+    assert torch.equal(module.proj_down, base_down)
+
+
+def test_pipeline_lora_mixin_rejects_unsupported_apis_and_text_encoder_lora(tmp_path):
+    transformer = make_patched_flux_transformer(tmp_path, rank=4)
+    pipeline = SimpleNamespace(transformer=transformer)
+
+    def lora_state_dict(self, state_dict, return_alphas=False, **kwargs):
+        metadata = {}
+        if return_alphas and kwargs.get("return_lora_metadata"):
+            return state_dict, {}, metadata
+        if return_alphas:
+            return state_dict, {}
+        return state_dict
+
+    pipeline.lora_state_dict = MethodType(lora_state_dict, pipeline)
+    bind_flux_pipeline_lora_methods(pipeline)
+    text_lora = {
+        "text_encoder.encoder.layers.0.self_attn.q_proj.lora_A.weight": torch.ones(1, 4),
+        "text_encoder.encoder.layers.0.self_attn.q_proj.lora_B.weight": torch.ones(4, 1),
+    }
+
+    with pytest.raises(NotImplementedError, match="text encoder LoRA keys"):
+        pipeline.load_lora_weights(text_lora, adapter_name="text")
+    with pytest.raises(NotImplementedError, match="does not support fusing"):
+        pipeline.fuse_lora()
+    with pytest.raises(NotImplementedError, match="does not support fusing"):
+        pipeline.unfuse_lora()

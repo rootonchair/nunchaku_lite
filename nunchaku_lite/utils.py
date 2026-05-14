@@ -172,7 +172,8 @@ def patch_scale_key(
         if key not in state_dict_from_checkpoint:
             if ".wcscales" not in key:
                 continue
-            state_dict_from_checkpoint[key] = torch.ones_like(state_dict[key])
+            scale = state_dict[key]
+            state_dict_from_checkpoint[key] = torch.ones(scale.shape, dtype=scale.dtype, device="cpu")
 
     from .models.linear import SVDQW4A4Linear
 

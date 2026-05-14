@@ -12,7 +12,7 @@ from pathlib import Path
 import torch
 from diffusers import ZImagePipeline
 
-from nunchaku_lite import patch_transformer
+from nunchaku_lite import load_nunchaku_pipeline
 
 
 model_id = "Tongyi-MAI/Z-Image-Turbo"
@@ -24,10 +24,10 @@ checkpoints = {
 checkpoint = checkpoints[precision]
 output_path = Path(f"outputs/z_image_nunchaku_lite_{precision}.png")
 
-pipe = ZImagePipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
-patch_transformer(
-    pipe.transformer,
-    checkpoint,
+pipe = load_nunchaku_pipeline(
+    model_id,
+    pipeline_cls=ZImagePipeline,
+    checkpoint=checkpoint,
     precision=precision,
     torch_dtype=torch.bfloat16,
     device="cuda",

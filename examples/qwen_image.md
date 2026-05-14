@@ -1,6 +1,6 @@
 # Qwen-Image INT4 / FP4
 
-Low-VRAM example for `Qwen/Qwen-Image`. This constructs the transformer from config, patches it with the INT4 or FP4 checkpoint, and passes it into the pipeline so Diffusers does not load dense BF16 transformer weights first.
+Low-VRAM example for `Qwen/Qwen-Image`. This loads the pipeline with a patched Nunchaku transformer so Diffusers does not load dense BF16 transformer weights first.
 
 Requires `accelerate` for `enable_model_cpu_offload()`.
 
@@ -12,9 +12,9 @@ Run from the repository root:
 from pathlib import Path
 
 import torch
-from diffusers import QwenImagePipeline, QwenImageTransformer2DModel
+from diffusers import QwenImagePipeline
 
-from nunchaku_lite import patch_transformer
+from nunchaku_lite import load_nunchaku_pipeline
 
 
 model_id = "Qwen/Qwen-Image"
@@ -26,20 +26,12 @@ checkpoints = {
 checkpoint = checkpoints[precision]
 output_path = Path(f"outputs/qwen_image_{precision}_low_vram.png")
 
-config = QwenImageTransformer2DModel.load_config(model_id, subfolder="transformer")
-transformer = QwenImageTransformer2DModel.from_config(config)
-
-patch_transformer(
-    transformer,
-    checkpoint,
+pipe = load_nunchaku_pipeline(
+    model_id,
+    pipeline_cls=QwenImagePipeline,
+    checkpoint=checkpoint,
     target="qwen_image",
     precision=precision,
-    torch_dtype=torch.bfloat16,
-)
-
-pipe = QwenImagePipeline.from_pretrained(
-    model_id,
-    transformer=transformer,
     torch_dtype=torch.bfloat16,
 )
 pipe.enable_model_cpu_offload()
@@ -78,10 +70,10 @@ Run from the repository root:
 from pathlib import Path
 
 import torch
-from diffusers import QwenImageEditPlusPipeline, QwenImageTransformer2DModel
+from diffusers import QwenImageEditPlusPipeline
 from diffusers.utils import load_image
 
-from nunchaku_lite import patch_transformer
+from nunchaku_lite import load_nunchaku_pipeline
 
 
 model_id = "Qwen/Qwen-Image-Edit-2509"
@@ -99,20 +91,12 @@ image_urls = [
     "https://huggingface.co/datasets/nunchaku-tech/test-data/resolve/main/inputs/sofa.png",
 ]
 
-config = QwenImageTransformer2DModel.load_config(model_id, subfolder="transformer")
-transformer = QwenImageTransformer2DModel.from_config(config)
-
-patch_transformer(
-    transformer,
-    checkpoint,
+pipe = load_nunchaku_pipeline(
+    model_id,
+    pipeline_cls=QwenImageEditPlusPipeline,
+    checkpoint=checkpoint,
     target="qwen_image",
     precision=precision,
-    torch_dtype=torch.bfloat16,
-)
-
-pipe = QwenImageEditPlusPipeline.from_pretrained(
-    model_id,
-    transformer=transformer,
     torch_dtype=torch.bfloat16,
 )
 pipe.enable_model_cpu_offload()
@@ -146,10 +130,10 @@ import math
 from pathlib import Path
 
 import torch
-from diffusers import FlowMatchEulerDiscreteScheduler, QwenImageEditPlusPipeline, QwenImageTransformer2DModel
+from diffusers import FlowMatchEulerDiscreteScheduler, QwenImageEditPlusPipeline
 from diffusers.utils import load_image
 
-from nunchaku_lite import patch_transformer
+from nunchaku_lite import load_nunchaku_pipeline
 
 
 model_id = "Qwen/Qwen-Image-Edit-2509"
@@ -189,20 +173,12 @@ scheduler_config = {
     "use_karras_sigmas": False,
 }
 
-config = QwenImageTransformer2DModel.load_config(model_id, subfolder="transformer")
-transformer = QwenImageTransformer2DModel.from_config(config)
-
-patch_transformer(
-    transformer,
-    checkpoint,
+pipe = load_nunchaku_pipeline(
+    model_id,
+    pipeline_cls=QwenImageEditPlusPipeline,
+    checkpoint=checkpoint,
     target="qwen_image",
     precision=precision,
-    torch_dtype=torch.bfloat16,
-)
-
-pipe = QwenImageEditPlusPipeline.from_pretrained(
-    model_id,
-    transformer=transformer,
     scheduler=FlowMatchEulerDiscreteScheduler.from_config(scheduler_config),
     torch_dtype=torch.bfloat16,
 )
@@ -236,10 +212,10 @@ import math
 from pathlib import Path
 
 import torch
-from diffusers import FlowMatchEulerDiscreteScheduler, QwenImageEditPlusPipeline, QwenImageTransformer2DModel
+from diffusers import FlowMatchEulerDiscreteScheduler, QwenImageEditPlusPipeline
 from diffusers.utils import load_image
 
-from nunchaku_lite import patch_transformer
+from nunchaku_lite import load_nunchaku_pipeline
 
 
 model_id = "Qwen/Qwen-Image-Edit-2509"
@@ -279,20 +255,12 @@ scheduler_config = {
     "use_karras_sigmas": False,
 }
 
-config = QwenImageTransformer2DModel.load_config(model_id, subfolder="transformer")
-transformer = QwenImageTransformer2DModel.from_config(config)
-
-patch_transformer(
-    transformer,
-    checkpoint,
+pipe = load_nunchaku_pipeline(
+    model_id,
+    pipeline_cls=QwenImageEditPlusPipeline,
+    checkpoint=checkpoint,
     target="qwen_image",
     precision=precision,
-    torch_dtype=torch.bfloat16,
-)
-
-pipe = QwenImageEditPlusPipeline.from_pretrained(
-    model_id,
-    transformer=transformer,
     scheduler=FlowMatchEulerDiscreteScheduler.from_config(scheduler_config),
     torch_dtype=torch.bfloat16,
 )

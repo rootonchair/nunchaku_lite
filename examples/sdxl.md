@@ -4,6 +4,10 @@ Examples for `stabilityai/stable-diffusion-xl-base-1.0` and `stabilityai/sdxl-tu
 
 Run from the repository root.
 
+These examples use INT4 checkpoints. On Blackwell GPUs, INT4 is allowed but may
+be slower than FP4; the referenced SDXL repositories do not currently publish
+FP4 SDXL weights.
+
 ## SDXL Base
 
 ```python
@@ -12,26 +16,23 @@ from pathlib import Path
 import torch
 from diffusers import StableDiffusionXLPipeline
 
-from nunchaku_lite import patch_transformer
+from nunchaku_lite import load_nunchaku_pipeline
 
 
 model_id = "stabilityai/stable-diffusion-xl-base-1.0"
 checkpoint = "nunchaku-ai/nunchaku-sdxl/svdq-int4_r32-sdxl.safetensors"
 output_path = Path("outputs/sdxl_nunchaku_lite_int4.png")
 
-pipe = StableDiffusionXLPipeline.from_pretrained(
+pipe = load_nunchaku_pipeline(
     model_id,
-    torch_dtype=torch.bfloat16,
-    use_safetensors=True,
-    variant="fp16",
-)
-patch_transformer(
-    pipe.unet,
-    checkpoint,
+    pipeline_cls=StableDiffusionXLPipeline,
+    checkpoint=checkpoint,
     target="sdxl",
     precision="int4",
     torch_dtype=torch.bfloat16,
     device="cuda",
+    use_safetensors=True,
+    variant="fp16",
 )
 pipe = pipe.to("cuda")
 
@@ -55,25 +56,22 @@ from pathlib import Path
 import torch
 from diffusers import StableDiffusionXLPipeline
 
-from nunchaku_lite import patch_transformer
+from nunchaku_lite import load_nunchaku_pipeline
 
 
 model_id = "stabilityai/sdxl-turbo"
 checkpoint = "nunchaku-ai/nunchaku-sdxl-turbo/svdq-int4_r32-sdxl-turbo.safetensors"
 output_path = Path("outputs/sdxl_turbo_nunchaku_lite_int4.png")
 
-pipe = StableDiffusionXLPipeline.from_pretrained(
+pipe = load_nunchaku_pipeline(
     model_id,
-    torch_dtype=torch.bfloat16,
-    variant="fp16",
-)
-patch_transformer(
-    pipe.unet,
-    checkpoint,
+    pipeline_cls=StableDiffusionXLPipeline,
+    checkpoint=checkpoint,
     target="sdxl",
     precision="int4",
     torch_dtype=torch.bfloat16,
     device="cuda",
+    variant="fp16",
 )
 pipe = pipe.to("cuda")
 

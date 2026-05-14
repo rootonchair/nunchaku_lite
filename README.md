@@ -2,14 +2,15 @@
   <img src="assets/logo.svg" alt="nunchaku_lite" width="640">
 </p>
 
-`nunchaku_lite` is a small, plugin-oriented runtime package for applying Nunchaku v2 quantized transformer and UNet weights to existing Diffusers pipelines. It is designed to patch a pipeline's model module in place, so downstream code can keep using standard Diffusers pipeline classes without subclassing or importing the full `nunchaku` package.
+`nunchaku_lite` is a small, plugin-oriented runtime package for applying Nunchaku v2 quantized transformer and UNet weights to Diffusers pipelines. The preferred loader injects the patched Nunchaku component while the pipeline is created, so Diffusers does not load unused dense BF16 transformer or UNet weights first.
 
 The first built-in adapters target Flux, Flux2, Qwen-Image, and Z-Image transformer classes plus SDXL UNet with SVDQ W4A4 checkpoints.
 
 ## Design Goals
 
 - Keep the public integration surface model-agnostic.
-- Patch existing `torch.nn.Module` model instances in place.
+- Load pipelines without first materializing unused dense transformer or UNet weights.
+- Keep low-level in-place patching available for advanced use.
 - Use a registry of small adapters for model-specific graph rewrites.
 - Package only the native kernels and Python code required for the lite runtime.
 - Avoid a hard dependency on the original `nunchaku` Python package.
@@ -88,10 +89,10 @@ Full quick-start scripts live under `examples/` so the main README stays focused
 | Model | Example | Notes |
 | --- | --- | --- |
 | Qwen-Image INT4 / FP4 | [examples/qwen_image.md](examples/qwen_image.md) | Qwen-Image plus Qwen-Image-Edit-2509 base, 4-step distilled, and 8-step distilled examples. |
-| Z-Image Turbo INT4 / FP4 | [examples/z_image.md](examples/z_image.md) | Standard `patch_transformer(pipe.transformer, ...)` flow. |
-| FLUX.1-schnell INT4 / FP4 | [examples/flux.md](examples/flux.md) | Standard Flux adapter flow. |
-| FLUX.2 Klein INT4 / FP4 | [examples/flux2.md](examples/flux2.md) | Standard Flux2 adapter flow. |
-| SDXL / SDXL-Turbo INT4 | [examples/sdxl.md](examples/sdxl.md) | UNet adapter flow using `patch_transformer(pipe.unet, ...)`. |
+| Z-Image Turbo INT4 / FP4 | [examples/z_image.md](examples/z_image.md) | Pipeline loader flow. |
+| FLUX.1-schnell INT4 / FP4 | [examples/flux.md](examples/flux.md) | Pipeline loader plus FLUX LoRA examples. |
+| FLUX.2 Klein INT4 / FP4 | [examples/flux2.md](examples/flux2.md) | Pipeline loader flow. |
+| SDXL / SDXL-Turbo INT4 | [examples/sdxl.md](examples/sdxl.md) | Pipeline loader flow for a quantized UNet. |
 
 The Qwen low-VRAM examples use `enable_model_cpu_offload()`, which requires `accelerate`.
 
@@ -107,10 +108,38 @@ org-or-user/repo-name/path/to/checkpoint.safetensors
 from nunchaku_lite import (
     TransformerAdapter,
     list_adapters,
+    load_nunchaku_pipeline,
     patch_transformer,
     register_adapter,
 )
 ```
+
+### `load_nunchaku_pipeline`
+
+```python
+pipe = load_nunchaku_pipeline(
+    "black-forest-labs/FLUX.1-schnell",
+    pipeline_cls=FluxPipeline,
+    checkpoint="nunchaku-ai/nunchaku-flux.1-schnell/svdq-fp4_r32-flux.1-schnell.safetensors",
+    target="flux",
+    precision="fp4",
+    torch_dtype=torch.bfloat16,
+    device="cuda",
+)
+```
+
+`load_nunchaku_pipeline` is the preferred public API. It reads the pipeline config, constructs the selected `transformer` or `unet` on the meta device, patches it with the Nunchaku adapter, loads the quantized checkpoint with `assign=True`, and passes the patched component into `pipeline_cls.from_pretrained(...)`. Diffusers then loads the rest of the pipeline normally while skipping the original dense component.
+
+Arguments:
+
+- `pretrained_model_name_or_path`: Diffusers pipeline model id or local path.
+- `pipeline_cls`: Diffusers pipeline class, such as `FluxPipeline` or `StableDiffusionXLPipeline`.
+- `checkpoint`: local or Hugging Face `.safetensors` checkpoint path.
+- `target`: adapter name, or `"auto"` to select the only matching adapter.
+- `component`: optional `"transformer"` or `"unet"` override. Auto-selection prefers `transformer`, then `unet`.
+- `precision`, `torch_dtype`, `device`, `strict`, and `adapter_options`: same patching controls as `patch_transformer`.
+- `bind_lora`: binds supported pipeline-level runtime APIs. FLUX LoRA APIs are bound by default.
+- additional keyword arguments are forwarded to `pipeline_cls.from_pretrained(...)`.
 
 ### `patch_transformer`
 
@@ -138,22 +167,29 @@ Arguments:
 - `strict`: forwarded to `load_state_dict`.
 - `adapter_options`: model-specific adapter options.
 
-The function is idempotent for the same target. A transformer patched once will be returned unchanged if patched again with the same target.
+This is the low-level compatibility API for callers that already constructed a component. Prefer `load_nunchaku_pipeline` for normal pipeline loading because it avoids loading dense weights that are immediately replaced. The function is idempotent for the same target. A transformer patched once will be returned unchanged if patched again with the same target.
 
 ### FLUX runtime LoRA
 
 Patched FLUX transformers expose runtime LoRA methods:
 
 ```python
-pipe = FluxPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
-patch_transformer(pipe.transformer, checkpoint, target="flux")
+pipe = load_nunchaku_pipeline(
+    model_id,
+    pipeline_cls=FluxPipeline,
+    checkpoint=checkpoint,
+    target="flux",
+    torch_dtype=torch.bfloat16,
+)
 
-pipe.transformer.load_lora("artist-style.safetensors", strength=0.8, name="artist")
-pipe.transformer.set_lora_strength(0.5, name="artist")
-pipe.transformer.reset_lora()
+pipe.load_lora_weights("artist-style.safetensors", adapter_name="artist")
+pipe.set_adapters("artist", adapter_weights=0.5)
+pipe.unload_lora_weights()
 ```
 
 `load_lora` accepts Diffusers-format FLUX LoRAs and Nunchaku-format low-rank tensors. Multiple LoRAs can be active at once; they are recomposed from the original checkpoint low-rank state when strengths change or one LoRA is reset.
+
+`load_nunchaku_pipeline` binds Diffusers-style pipeline LoRA methods for FLUX automatically. Advanced callers using `patch_transformer` directly can still bind those methods manually with `nunchaku_lite.lora.bind_flux_pipeline_lora_methods(pipe)`.
 
 ### Adapter Registry
 
@@ -171,7 +207,7 @@ class MyAdapter:
         return checkpoint_state
 ```
 
-Register an adapter before calling `patch_transformer`:
+Register an adapter before calling `load_nunchaku_pipeline` or `patch_transformer`:
 
 ```python
 from nunchaku_lite import register_adapter
@@ -240,7 +276,7 @@ Adapter responsibilities:
 
 `patch_modules_recursively` mutates the selected module tree in place and returns a `ModulePatchReport` with replacement and skip counts. Use `linear_filter` or narrow roots so only checkpoint-backed dense projections are replaced. Use `module_converters` for exact-class model blocks that can be normalized before descending. Use `custom_attention_converters` for Diffusers `Attention` subclasses that require a model-specific replacement; unsupported attention subclasses now raise `TypeError` instead of being silently skipped.
 
-Avoid adding a pipeline subclass for a new model unless the upstream Diffusers pipeline itself requires one. The preferred integration is still `patch_transformer(pipe.transformer, checkpoint, target="...")`.
+Avoid adding a pipeline subclass for a new model unless the upstream Diffusers pipeline itself requires one. The preferred integration is `load_nunchaku_pipeline(model_id, pipeline_cls=..., checkpoint=..., target="...")`.
 
 ## Benchmarking
 
@@ -301,6 +337,15 @@ Run unit tests:
 ```bash
 pytest -q tests
 ```
+
+Run the opt-in FLUX.1-dev full inference test:
+
+```bash
+NUNCHAKU_LITE_RUN_FULL_INFERENCE=1 \
+PYTHONPATH=. pytest -q -m full_inference tests/test_full_inference_flux.py
+```
+
+The full inference test requires CUDA, model access, and enough VRAM or offload memory for FLUX.1-dev. It exercises `load_nunchaku_pipeline`, baseline generation, Diffusers-style FLUX LoRA loading, strength changes, multi-LoRA composition with Ghibsky plus Canopus UltraRealism, delete/reset, and unload. Generated images are written to pytest's temp directory by default; set `NUNCHAKU_LITE_FULL_INFERENCE_OUTPUT_DIR=outputs/full_inference_flux` to keep them.
 
 Build the extension in place:
 
