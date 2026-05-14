@@ -1,0 +1,189 @@
+import json
+from types import SimpleNamespace
+
+import pytest
+import torch
+from safetensors.torch import save_file
+
+from nunchaku_lite import patch_transformer
+from nunchaku_lite.adapters.flux import FluxAdapter
+from nunchaku_lite.lora.flux import convert_flux_lora_to_lite, unpack_lowrank_weight
+
+from test_flux_adapter import make_tiny_flux_transformer
+
+
+def make_patched_flux_transformer(tmp_path, rank=4):
+    source = make_tiny_flux_transformer()
+    FluxAdapter().patch(
+        source,
+        {},
+        {"rank": rank},
+        SimpleNamespace(
+            precision="int4",
+            torch_dtype=torch.bfloat16,
+            device=None,
+            strict=True,
+            adapter_options={},
+        ),
+    )
+    state = {}
+    for index, (key, value) in enumerate(source.state_dict().items()):
+        if value.is_floating_point():
+            state[key] = torch.full_like(value, (index % 17) / 100)
+        else:
+            state[key] = torch.zeros_like(value)
+
+    checkpoint = tmp_path / "flux-lite.safetensors"
+    save_file(state, checkpoint, metadata={"quantization_config": json.dumps({"rank": rank})})
+    transformer = make_tiny_flux_transformer()
+    return patch_transformer(transformer, checkpoint, precision="int4", torch_dtype=torch.bfloat16)
+
+
+def test_flux_lora_methods_are_bound_after_patch(tmp_path):
+    transformer = make_patched_flux_transformer(tmp_path)
+
+    assert callable(transformer.load_lora)
+    assert callable(transformer.set_lora_strength)
+    assert callable(transformer.reset_lora)
+    assert transformer._nunchaku_lite_loras == {}
+
+
+def test_load_nunchaku_lora_composes_strength_and_reset(tmp_path):
+    transformer = make_patched_flux_transformer(tmp_path, rank=4)
+    module_name = "transformer_blocks.0.attn.to_out.0"
+    module = transformer.get_submodule(module_name)
+    base_down = module.proj_down.detach().clone()
+    base_up = module.proj_up.detach().clone()
+    lora = {
+        f"{module_name}.proj_down": torch.ones(module.in_features, 2, dtype=torch.bfloat16),
+        f"{module_name}.proj_up": torch.full((module.out_features, 2), 2.0, dtype=torch.bfloat16),
+    }
+
+    name = transformer.load_lora(lora, strength=0.5, name="style")
+
+    assert name == "style"
+    logical_down = unpack_lowrank_weight(module.proj_down.detach(), down=True)
+    logical_up = unpack_lowrank_weight(module.proj_up.detach(), down=False)
+    assert torch.equal(logical_down[:4], base_down.T)
+    assert torch.equal(logical_up[:, :4], base_up)
+    assert torch.allclose(logical_down[4:6], torch.full_like(logical_down[4:6], 0.5))
+    assert torch.allclose(logical_up[:, 4:6], torch.full_like(logical_up[:, 4:6], 2.0))
+    assert torch.count_nonzero(logical_down[6:]) == 0
+    assert torch.count_nonzero(logical_up[:, 6:]) == 0
+
+    transformer.reset_lora()
+
+    assert torch.equal(module.proj_down, base_down)
+    assert torch.equal(module.proj_up, base_up)
+    assert transformer._nunchaku_lite_loras == {}
+
+
+def test_set_named_lora_strength_recomposes_from_baseline(tmp_path):
+    transformer = make_patched_flux_transformer(tmp_path, rank=4)
+    module_name = "transformer_blocks.0.attn.to_out.0"
+    module = transformer.get_submodule(module_name)
+    first = {
+        f"{module_name}.proj_down": torch.ones(module.in_features, 1, dtype=torch.bfloat16),
+        f"{module_name}.proj_up": torch.ones(module.out_features, 1, dtype=torch.bfloat16),
+    }
+    second = {
+        f"{module_name}.proj_down": torch.full((module.in_features, 1), 3.0, dtype=torch.bfloat16),
+        f"{module_name}.proj_up": torch.ones(module.out_features, 1, dtype=torch.bfloat16),
+    }
+
+    transformer.load_lora(first, strength=1.0, name="first")
+    transformer.load_lora(second, strength=0.25, name="second")
+    transformer.set_lora_strength(0.5, name="second")
+
+    logical_down = unpack_lowrank_weight(module.proj_down.detach(), down=True)
+    assert torch.allclose(logical_down[4:5], torch.ones_like(logical_down[4:5]))
+    assert torch.allclose(logical_down[5:6], torch.full_like(logical_down[5:6], 1.5))
+    with pytest.raises(ValueError, match="Multiple LoRAs"):
+        transformer.set_lora_strength(1.0)
+
+    transformer.reset_lora("first")
+
+    assert list(transformer._nunchaku_lite_loras) == ["second"]
+    logical_down = unpack_lowrank_weight(module.proj_down.detach(), down=True)
+    assert module.proj_down.shape[1] == 16
+    assert torch.allclose(logical_down[4:5], torch.full_like(logical_down[4:5], 1.5))
+    assert torch.count_nonzero(logical_down[5:]) == 0
+
+
+def test_load_diffusers_adanorm_lora_sets_awq_side_branch(tmp_path):
+    transformer = make_patched_flux_transformer(tmp_path, rank=4)
+    module_name = "transformer_blocks.0.norm1.linear"
+    module = transformer.get_submodule(module_name)
+    lora = {
+        f"transformer.{module_name}.lora_A.weight": torch.ones(2, module.in_features, dtype=torch.bfloat16),
+        f"transformer.{module_name}.lora_B.weight": torch.ones(module.out_features, 2, dtype=torch.bfloat16),
+    }
+
+    transformer.load_lora(lora, strength=0.25, name="norm")
+
+    assert module._nunchaku_lite_lora_down.shape == (module.in_features, 16)
+    assert module._nunchaku_lite_lora_up.shape == (module.out_features, 16)
+    assert torch.allclose(
+        module._nunchaku_lite_lora_down[:, :2],
+        torch.full_like(module._nunchaku_lite_lora_down[:, :2], 0.25),
+    )
+    assert torch.count_nonzero(module._nunchaku_lite_lora_down[:, 2:]) == 0
+    transformer.reset_lora()
+    assert module._nunchaku_lite_lora_down.shape == (module.in_features, 0)
+    assert module._nunchaku_lite_lora_up.shape == (module.out_features, 0)
+
+
+def test_convert_diffusers_qkv_lora_to_lite_fused_projection(tmp_path):
+    transformer = make_patched_flux_transformer(tmp_path, rank=4)
+    rank = 2
+    lora = {}
+    for index, branch in enumerate(("to_q", "to_k", "to_v"), start=1):
+        base = f"transformer.transformer_blocks.0.attn.{branch}"
+        lora[f"{base}.lora_A.weight"] = torch.full((rank, 32), float(index), dtype=torch.bfloat16)
+        lora[f"{base}.lora_B.weight"] = torch.full((32, rank), float(index), dtype=torch.bfloat16)
+
+    converted = convert_flux_lora_to_lite(lora, transformer)
+
+    assert set(converted) == {
+        "transformer_blocks.0.attn.to_qkv.proj_down",
+        "transformer_blocks.0.attn.to_qkv.proj_up",
+    }
+    assert converted["transformer_blocks.0.attn.to_qkv.proj_down"].shape == (32, 16)
+    assert converted["transformer_blocks.0.attn.to_qkv.proj_up"].shape == (96, 16)
+
+
+def test_convert_single_proj_out_lora_splits_attn_before_mlp(tmp_path):
+    transformer = make_patched_flux_transformer(tmp_path, rank=4)
+    attn_module = transformer.get_submodule("single_transformer_blocks.0.attn.to_out")
+    mlp_module = transformer.get_submodule("single_transformer_blocks.0.mlp_fc2")
+    rank = 2
+    attn_down = torch.full((rank, attn_module.in_features), 3.0, dtype=torch.bfloat16)
+    mlp_down = torch.full((rank, mlp_module.in_features), 7.0, dtype=torch.bfloat16)
+    lora = {
+        "transformer.single_transformer_blocks.0.proj_out.lora_A.weight": torch.cat(
+            [attn_down, mlp_down], dim=1
+        ),
+        "transformer.single_transformer_blocks.0.proj_out.lora_B.weight": torch.ones(
+            attn_module.out_features, rank, dtype=torch.bfloat16
+        ),
+    }
+
+    converted = convert_flux_lora_to_lite(lora, transformer)
+
+    converted_attn = unpack_lowrank_weight(
+        converted["single_transformer_blocks.0.attn.to_out.proj_down"], down=True
+    )
+    converted_mlp = unpack_lowrank_weight(converted["single_transformer_blocks.0.mlp_fc2.proj_down"], down=True)
+    assert torch.allclose(converted_attn[:rank], attn_down)
+    assert torch.allclose(converted_mlp[:rank], mlp_down)
+
+
+def test_unsupported_flux_lora_target_raises(tmp_path):
+    transformer = make_patched_flux_transformer(tmp_path)
+    lora = {
+        "transformer.transformer_blocks.0.not_a_module.lora_A.weight": torch.ones(2, 32),
+        "transformer.transformer_blocks.0.not_a_module.lora_B.weight": torch.ones(192, 2),
+    }
+
+    with pytest.raises(ValueError, match="Unsupported Flux LoRA target"):
+        transformer.load_lora(lora)

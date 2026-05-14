@@ -334,6 +334,18 @@ class AWQW4A16Linear(nn.Module):
         )
         if self.bias is not None:
             output.add_(self.bias.view([1] * (output.ndim - 1) + [-1]))
+        lora_down = getattr(self, "_nunchaku_lite_lora_down", None)
+        lora_up = getattr(self, "_nunchaku_lite_lora_up", None)
+        if lora_down is not None and lora_up is not None and lora_down.shape[1] > 0:
+            if lora_down.device != x.device:
+                lora_down = lora_down.to(x.device)
+                self._nunchaku_lite_lora_down = lora_down
+            if lora_up.device != x.device:
+                lora_up = lora_up.to(x.device)
+                self._nunchaku_lite_lora_up = lora_up
+            lora = torch.matmul(x.to(lora_down.dtype), lora_down)
+            lora = torch.matmul(lora, lora_up.transpose(0, 1))
+            output.add_(lora.to(output.dtype))
         return output
 
     def __repr__(self):

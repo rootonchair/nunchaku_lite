@@ -39,7 +39,7 @@ The full `nunchaku` package in this repository exposes a broader set of model-sp
 - [ ] Sana transformer adapter based on `NunchakuSanaTransformer2DModel`, covering Sana 1.6B and Sana PAG examples.
 - [x] SDXL UNet adapter based on `NunchakuSDXLUNet2DConditionModel`, covering SDXL and SDXL-Turbo examples.
 - [ ] Quantized T5 text encoder support based on `NunchakuT5EncoderModel`.
-- [ ] FLUX runtime LoRA support, including Diffusers-format conversion, Nunchaku-format loading, strength control, reset, and multi-LoRA composition.
+- [x] FLUX runtime LoRA support, including Diffusers-format conversion, Nunchaku-format loading, strength control, reset, and multi-LoRA composition.
 - [ ] Qwen-Image runtime LoRA support, covering Qwen-Image and Qwen-Image-Edit families after LoRA key mapping is defined.
 - [ ] Flux2 runtime LoRA support, reusing FLUX conversion patterns where compatible.
 - [ ] SDXL runtime LoRA support for quantized UNet attention and MLP projections.
@@ -139,6 +139,21 @@ Arguments:
 - `adapter_options`: model-specific adapter options.
 
 The function is idempotent for the same target. A transformer patched once will be returned unchanged if patched again with the same target.
+
+### FLUX runtime LoRA
+
+Patched FLUX transformers expose runtime LoRA methods:
+
+```python
+pipe = FluxPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
+patch_transformer(pipe.transformer, checkpoint, target="flux")
+
+pipe.transformer.load_lora("artist-style.safetensors", strength=0.8, name="artist")
+pipe.transformer.set_lora_strength(0.5, name="artist")
+pipe.transformer.reset_lora()
+```
+
+`load_lora` accepts Diffusers-format FLUX LoRAs and Nunchaku-format low-rank tensors. Multiple LoRAs can be active at once; they are recomposed from the original checkpoint low-rank state when strengths change or one LoRA is reset.
 
 ### Adapter Registry
 

@@ -804,6 +804,9 @@ class FluxAdapter:
         checkpoint_state = convert_flux_state_dict(checkpoint_state)
         finalize_svdq_checkpoint(transformer, checkpoint_state, context)
         transformer._nunchaku_lite_flux_patched = True
+        from ..lora.flux import bind_flux_lora_methods
+
+        bind_flux_lora_methods(transformer)
         return checkpoint_state
 
     def _patch_transformer(self, transformer: torch.nn.Module, context: SVDQPatchContext) -> None:
