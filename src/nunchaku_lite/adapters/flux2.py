@@ -478,7 +478,10 @@ class NunchakuFlux2ParallelSelfAttention(nn.Module):
         num_txt_tokens = int(kwargs.get("num_txt_tokens", 0))
         num_ref_tokens = int(kwargs.get("num_ref_tokens", 0))
         use_packed_fp16 = (
-            kv_cache_mode is None and torch.is_tensor(image_rotary_emb) and image_rotary_emb.ndim == 3 and hidden_states.is_cuda
+            kv_cache_mode is None
+            and torch.is_tensor(image_rotary_emb)
+            and image_rotary_emb.ndim == 3
+            and hidden_states.is_cuda
         )
         if use_packed_fp16:
             return self._forward_packed(hidden_states, image_rotary_emb)
@@ -896,8 +899,25 @@ class Flux2Adapter:
         transformer._nunchaku_lite_flux2_original_forward = transformer.forward
         transformer.forward = types.MethodType(lite_flux2_forward, transformer)
         finalize_svdq_checkpoint(transformer, checkpoint_state, context)
+        from ..lora.base import bind_transformer_lora_methods
+        from ..lora.flux2 import NunchakuFlux2TransformerLoraMixin
+
+        bind_transformer_lora_methods(transformer, NunchakuFlux2TransformerLoraMixin)
         transformer._nunchaku_lite_flux2_patched = True
         return checkpoint_state
+
+    def patch_pipeline(
+        self,
+        pipeline: Any,
+        *,
+        component_name: str = "transformer",
+        component: torch.nn.Module | None = None,
+    ) -> None:
+        """Attach Flux2 pipeline-level runtime APIs."""
+
+        from ..lora.base import NunchakuPipelineLoraMixin, bind_pipeline_lora_methods
+
+        bind_pipeline_lora_methods(pipeline, NunchakuPipelineLoraMixin)
 
     def _patch_transformer(self, transformer: torch.nn.Module, context: SVDQPatchContext) -> None:
         """Patch Flux2 block modules through one recursive transformer traversal.

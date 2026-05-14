@@ -42,7 +42,7 @@ The full `nunchaku` package in this repository exposes a broader set of model-sp
 - [ ] Quantized T5 text encoder support based on `NunchakuT5EncoderModel`.
 - [x] FLUX runtime LoRA support, including Diffusers-format conversion, Nunchaku-format loading, strength control, reset, and multi-LoRA composition.
 - [x] Qwen-Image runtime LoRA support, covering Qwen-Image and Qwen-Image-Edit families.
-- [ ] Flux2 runtime LoRA support, reusing FLUX conversion patterns where compatible.
+- [x] Flux2 runtime LoRA support, including ComfyUI Flux2 LoRA key conversion.
 - [ ] SDXL runtime LoRA support for quantized UNet attention and MLP projections.
 - [ ] Z-Image runtime LoRA support for quantized transformer projections.
 - [ ] FLUX IP-Adapter integration.
@@ -91,7 +91,7 @@ Full quick-start scripts live under `examples/` so the main README stays focused
 | Qwen-Image INT4 / FP4 | [examples/qwen_image.md](examples/qwen_image.md) | Qwen-Image plus Qwen-Image-Edit-2509 base, 4-step distilled, and 8-step distilled examples. |
 | Z-Image Turbo INT4 / FP4 | [examples/z_image.md](examples/z_image.md) | Pipeline loader flow. |
 | FLUX.1-schnell INT4 / FP4 | [examples/flux.md](examples/flux.md) | Pipeline loader plus FLUX LoRA examples. |
-| FLUX.2 Klein INT4 / FP4 | [examples/flux2.md](examples/flux2.md) | Pipeline loader flow. |
+| FLUX.2 Klein INT4 / FP4 | [examples/flux2.md](examples/flux2.md) | Pipeline loader plus Flux2 LoRA examples. |
 | SDXL / SDXL-Turbo INT4 | [examples/sdxl.md](examples/sdxl.md) | Pipeline loader flow for a quantized UNet. |
 
 The Qwen low-VRAM examples use `enable_model_cpu_offload()`, which requires `accelerate`.
@@ -445,6 +445,15 @@ PYTHONPATH=src pytest -q -m full_inference tests/test_full_inference_flux.py
 ```
 
 The full inference test requires CUDA, model access, and enough VRAM or offload memory for FLUX.1-dev. It exercises `load_nunchaku_pipeline`, baseline generation, Diffusers-style FLUX LoRA loading, strength changes, multi-LoRA composition with Ghibsky plus Canopus UltraRealism, delete/reset, and unload. Generated images are written to pytest's temp directory by default; set `NUNCHAKU_LITE_FULL_INFERENCE_OUTPUT_DIR=outputs/full_inference_flux` to keep them.
+
+Run the opt-in FLUX.2 Klein runtime LoRA full inference test:
+
+```bash
+NUNCHAKU_LITE_RUN_FULL_INFERENCE=1 \
+PYTHONPATH=src pytest -q -m full_inference tests/test_full_inference_flux2.py
+```
+
+The FLUX.2 full inference test defaults to the INT4 `tonera/FLUX.2-klein-9B-Nunchaku` checkpoint and the ComfyUI-format `artificialguybr/PIXELART-REDMOND-FLUXKLEIN9B` LoRA. Override `NUNCHAKU_LITE_FLUX2_FULL_INFERENCE_*` environment variables to use another compatible checkpoint or LoRA.
 
 Build the extension in place:
 
