@@ -8,11 +8,15 @@ import torch
 
 from ..models.linear import AWQW4A16Linear, SVDQW4A4Linear
 from .base import (
+    DenseRuntimeLoraLinear,
     fit_lora_tensor,
     iter_lora_pairs,
+    looks_like_packed_lowrank,
     lora_modules,
     pack_lowrank_weight,
     pad_lora_tensor,
+    svdq_down_to_logical,
+    svdq_up_to_logical,
 )
 
 
@@ -203,7 +207,7 @@ def set_standard_converted_lora_pair(
     target_name: str,
     down: torch.Tensor,
     up: torch.Tensor,
-    module: SVDQW4A4Linear | AWQW4A16Linear,
+    module: SVDQW4A4Linear | AWQW4A16Linear | DenseRuntimeLoraLinear,
 ) -> None:
     """Store a converted low-rank pair using the packing expected by a module.
 
@@ -213,16 +217,19 @@ def set_standard_converted_lora_pair(
             suffix.
         down: Logical LoRA down tensor in rank-by-input layout.
         up: Logical LoRA up tensor in output-by-rank layout.
-        module: Target quantized linear module that determines whether tensors
-            are packed for SVDQ W4A4 or padded for AWQ W4A16.
+        module: Target runtime LoRA module that determines whether tensors are
+            packed for SVDQ W4A4, padded for AWQ W4A16, or kept dense.
     """
 
     if isinstance(module, SVDQW4A4Linear):
         down = pack_lowrank_weight(down, down=True)
         up = pack_lowrank_weight(up, down=False)
-    else:
+    elif isinstance(module, AWQW4A16Linear):
         down = pad_lora_tensor(down, divisor=16, dim=0)
         up = pad_lora_tensor(up, divisor=16, dim=1)
+    else:
+        down = down.contiguous()
+        up = up.contiguous()
     converted[f"{target_name}.proj_down"] = down
     converted[f"{target_name}.proj_up"] = up
 
@@ -235,7 +242,8 @@ def validate_nunchaku_lora_state_dict(
 
     Args:
         state_dict: Nunchaku-format LoRA state dict with ``.proj_down/.proj_up`` keys.
-        transformer: Patched transformer containing target SVDQ/AWQ modules.
+        transformer: Patched transformer containing target SVDQ/AWQ/dense
+            runtime LoRA modules.
     """
 
     modules = lora_modules(transformer)
@@ -248,8 +256,29 @@ def validate_nunchaku_lora_state_dict(
         if module_name not in modules:
             raise ValueError(
                 f"LoRA target {module_name!r} does not exist on this patched {LORA_ERROR_LABEL} transformer."
-            )
+        )
         module = modules[module_name]
+        if isinstance(module, SVDQW4A4Linear):
+            down_logical = svdq_down_to_logical(state_dict[down_key], module, module_name)
+            up_logical = svdq_up_to_logical(state_dict[up_key], module, module_name)
+            if down_logical.shape[0] != up_logical.shape[1]:
+                raise ValueError(
+                    f"LoRA rank mismatch for {module_name}: "
+                    f"proj_down={tuple(down_logical.shape)}, proj_up={tuple(up_logical.shape)}"
+                )
+            if looks_like_packed_lowrank(state_dict[down_key], module.in_features) or looks_like_packed_lowrank(
+                state_dict[up_key], module.out_features
+            ):
+                valid[down_key] = pack_lowrank_weight(down_logical, down=True)
+                valid[up_key] = pack_lowrank_weight(up_logical, down=False)
+            else:
+                valid[down_key] = fit_lora_tensor(
+                    state_dict[down_key], module.in_features, down=True, module_name=module_name
+                )
+                valid[up_key] = fit_lora_tensor(
+                    state_dict[up_key], module.out_features, down=False, module_name=module_name
+                )
+            continue
         down = fit_lora_tensor(state_dict[down_key], module.in_features, down=True, module_name=module_name)
         up = fit_lora_tensor(state_dict[up_key], module.out_features, down=False, module_name=module_name)
         if down.shape[1] != up.shape[1]:

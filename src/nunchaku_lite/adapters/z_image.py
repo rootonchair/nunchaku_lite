@@ -11,6 +11,7 @@ from diffusers.models.transformers.transformer_z_image import FeedForward as Dif
 from diffusers.models.transformers.transformer_z_image import ZSingleStreamAttnProcessor
 
 from ..core import PatchOptions, register_adapter
+from ..lora.base import DenseRuntimeLoraLinear
 from ..ops.fused import fused_qkv_norm_rotary
 from .common import (
     SVDQPatchContext,
@@ -174,11 +175,29 @@ class ZImageAdapter:
         prepare_transformer_dtype(transformer, context)
 
         self._patch_transformer(transformer, context, skip_refiners)
+        self._patch_adaln_lora_linears(transformer, skip_refiners)
 
         transformer.skip_refiners = skip_refiners
         self._install_rope_forward_wrapper(transformer)
         finalize_svdq_checkpoint(transformer, checkpoint_state, context)
+        from ..lora.base import bind_transformer_lora_methods
+        from ..lora.z_image import NunchakuZImageTransformerLoraMixin
+
+        bind_transformer_lora_methods(transformer, NunchakuZImageTransformerLoraMixin)
         return checkpoint_state
+
+    def patch_pipeline(
+        self,
+        pipeline: Any,
+        *,
+        component_name: str = "transformer",
+        component: torch.nn.Module | None = None,
+    ) -> None:
+        """Attach Z-Image pipeline-level runtime LoRA APIs."""
+
+        from ..lora.base import NunchakuPipelineLoraMixin, bind_pipeline_lora_methods
+
+        bind_pipeline_lora_methods(pipeline, NunchakuPipelineLoraMixin)
 
     def _patch_transformer(
         self,
@@ -209,6 +228,31 @@ class ZImageAdapter:
             skip_subtree=lambda path, module: self._should_skip_subtree(path, module, skip_refiners),
             module_converters={DiffusersZImageFeedForward: _convert_z_image_ff},
         )
+
+    def _patch_adaln_lora_linears(self, transformer: torch.nn.Module, skip_refiners: bool) -> None:
+        """Wrap AdaLN modulation linears so runtime LoRAs can target them.
+
+        Args:
+            transformer: Z-Image transformer after block conversion.
+            skip_refiners: Whether refiner blocks should stay outside the
+                runtime LoRA target set.
+        """
+
+        for layer in transformer.layers:
+            self._wrap_block_adaln_lora(layer)
+        if not skip_refiners:
+            for layer in transformer.noise_refiner:
+                self._wrap_block_adaln_lora(layer)
+
+    def _wrap_block_adaln_lora(self, block: torch.nn.Module) -> None:
+        """Wrap one block's AdaLN modulation linear when present."""
+
+        adaln = getattr(block, "adaLN_modulation", None)
+        if adaln is None or not hasattr(adaln, "__getitem__"):
+            return
+        if not isinstance(adaln[0], nn.Linear) or isinstance(adaln[0], DenseRuntimeLoraLinear):
+            return
+        adaln[0] = DenseRuntimeLoraLinear.from_linear(adaln[0])
 
     def _should_patch_linear(self, path: str, skip_refiners: bool) -> bool:
         """Return whether a discovered dense linear should become SVDQ.
