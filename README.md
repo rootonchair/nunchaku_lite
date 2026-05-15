@@ -2,6 +2,15 @@
   <img src="assets/logo.svg" alt="nunchaku_lite" width="640">
 </p>
 
+<p align="center">
+  <a href="https://github.com/rootonchair/nunchaku_lite/actions/workflows/cpu-tests.yml">
+    <img src="https://github.com/rootonchair/nunchaku_lite/actions/workflows/cpu-tests.yml/badge.svg" alt="CPU Tests">
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0">
+  </a>
+</p>
+
 ## About
 
 `nunchaku_lite` brings Nunchaku-quantized image generation models to standard
@@ -57,6 +66,7 @@ coverage and remaining feature work.
 - Ninja
 - Diffusers 0.36 or newer
 - Transformers 4.41.2 or newer
+- PEFT
 - Accelerate 0.31 or newer for CPU offload examples
 - Hugging Face Hub, Safetensors, and Packaging
 
