@@ -72,7 +72,7 @@ def get_base_version(root_dir: str) -> str:
 
 if __name__ == "__main__":
     root_dir = os.path.dirname(__file__)
-    version = get_base_version(root_dir)
+    version = os.getenv("NUNCHAKU_LITE_RELEASE_VERSION") or get_base_version(root_dir)
 
     torch_version = torch.__version__.split("+")[0]
     torch_major_minor_version = ".".join(torch_version.split(".")[:2])

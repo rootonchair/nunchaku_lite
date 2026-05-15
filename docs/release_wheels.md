@@ -3,27 +3,23 @@
 Release wheels are built by GitHub Actions with `cibuildwheel` when a version
 tag is pushed.
 
+Before releasing, make sure `src/nunchaku_lite/__version__.py` points at the
+release series. For example, `0.1.0dev` is valid for tag `v0.1.0`.
+
 ## Trigger A Release Build
 
-Create and push a tag whose name starts with `v`:
+Create and push a tag from the commit you want to release:
 
 ```bash
-python - <<'PY'
-from pathlib import Path
-
-path = Path("src/nunchaku_lite/__version__.py")
-path.write_text(path.read_text().replace('0.1.0dev', '0.1.0'))
-PY
-git add src/nunchaku_lite/__version__.py
-git commit -m "Release v0.1.0"
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
 The release workflow validates that the tag matches the committed package
-version in `src/nunchaku_lite/__version__.py`. Release tags must use a non-dev
-version, such as `0.1.0`. Development source installs should keep the `dev`
-postfix, such as `0.1.0dev`.
+version after allowing a trailing `dev` postfix. Tag `v0.1.0` may build from
+either `0.1.0` or `0.1.0dev`. For tag builds, CI strips only the build version
+by setting `NUNCHAKU_LITE_RELEASE_VERSION`; it does not edit the committed
+source file.
 
 The final wheel version still includes the existing CUDA and Torch local suffix,
 for example:
@@ -35,12 +31,6 @@ for example:
 After release, bump to the next dev version:
 
 ```bash
-python - <<'PY'
-from pathlib import Path
-
-path = Path("src/nunchaku_lite/__version__.py")
-path.write_text(path.read_text().replace('0.1.0', '0.1.1dev'))
-PY
 git add src/nunchaku_lite/__version__.py
 git commit -m "Start 0.1.1 development"
 ```
@@ -72,7 +62,9 @@ also include `sm121a`.
 
 ## Local Reproduction
 
-Install `cibuildwheel`, choose a Torch/CUDA pair, and run the Linux build:
+Install `cibuildwheel`, choose a Torch/CUDA pair, and run the Linux build. Set
+`NUNCHAKU_LITE_RELEASE_VERSION` only when reproducing a tag release; omit it for
+normal dev builds.
 
 ```bash
 python -m pip install cibuildwheel==3.4.1
@@ -81,6 +73,7 @@ export CUDA_VISIBLE_DEVICES=""
 export NUNCHAKU_BUILD_WHEELS=1
 export NUNCHAKU_CUDA_VERSION=13.0
 export NUNCHAKU_INSTALL_MODE=ALL
+export NUNCHAKU_LITE_RELEASE_VERSION=0.1.0
 export NUNCHAKU_TORCH_CUDA_TAG=cu130
 export NUNCHAKU_TORCH_VERSION=2.11.0
 
