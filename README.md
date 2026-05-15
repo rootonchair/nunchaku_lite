@@ -44,15 +44,15 @@ Its core features include:
 `nunchaku_lite` currently supports Diffusers pipelines whose transformer or UNet
 component matches one of the built-in adapters below. Checkpoints should be SVDQ
 W4A4 Nunchaku v2 `.safetensors` files in INT4 or FP4 format. Full runnable
-guides live under `examples/`.
+model guides live under `docs/models/`.
 
 | Model family | Coverage | Runtime LoRA | Guide | Features |
 | --- | --- | --- | --- | --- |
-| FLUX.1 | FLUX.1-schnell and FLUX.1-dev | Yes | [examples/flux.md](examples/flux.md) | Pipeline loading, INT4/FP4 checkpoints, Diffusers-format LoRA loading, strength control, multi-LoRA composition, reset, and unload. |
-| FLUX.2 Klein | FLUX.2 Klein | Yes | [examples/flux2.md](examples/flux2.md) | Pipeline loading, INT4/FP4 checkpoints, runtime LoRA, and ComfyUI Flux2 LoRA key conversion. |
-| Qwen-Image and Qwen-Image-Edit | Qwen-Image, Qwen-Image-Lightning, Qwen-Image-Edit, and Qwen-Image-Edit-2509 | Yes | [examples/qwen_image.md](examples/qwen_image.md) | Pipeline loading, INT4/FP4 checkpoints, low-VRAM examples, Lightning LoRA workflows, and edit-pipeline examples. |
-| SDXL and SDXL-Turbo | SDXL and SDXL-Turbo | Not yet | [examples/sdxl.md](examples/sdxl.md) | Pipeline loading for quantized UNet checkpoints. |
-| Z-Image Turbo | Z-Image Turbo | Yes | [examples/z_image.md](examples/z_image.md) | Pipeline loading, INT4/FP4 checkpoints, runtime LoRA, and dense AdaLN modulation LoRA branches. |
+| FLUX.1 | FLUX.1-schnell and FLUX.1-dev | Yes | [docs/models/flux.md](docs/models/flux.md) | Pipeline loading, INT4/FP4 checkpoints, Diffusers-format LoRA loading, strength control, multi-LoRA composition, reset, and unload. |
+| FLUX.2 Klein | FLUX.2 Klein | Yes | [docs/models/flux2.md](docs/models/flux2.md) | Pipeline loading, INT4/FP4 checkpoints, runtime LoRA, and ComfyUI Flux2 LoRA key conversion. |
+| Qwen-Image and Qwen-Image-Edit | Qwen-Image, Qwen-Image-Lightning, Qwen-Image-Edit, and Qwen-Image-Edit-2509 | Yes | [docs/models/qwen_image.md](docs/models/qwen_image.md) | Pipeline loading, INT4/FP4 checkpoints, low-VRAM examples, Lightning LoRA workflows, and edit-pipeline examples. |
+| SDXL and SDXL-Turbo | SDXL and SDXL-Turbo | Not yet | [docs/models/sdxl.md](docs/models/sdxl.md) | Pipeline loading for quantized UNet checkpoints. |
+| Z-Image Turbo | Z-Image Turbo | Yes | [docs/models/z_image.md](docs/models/z_image.md) | Pipeline loading, INT4/FP4 checkpoints, runtime LoRA, and dense AdaLN modulation LoRA branches. |
 
 The Qwen low-VRAM guides use `enable_model_cpu_offload()`, which requires
 `accelerate`.
@@ -65,21 +65,23 @@ coverage and remaining feature work.
 
 - Python 3.10 or newer
 - PyTorch 2.7 or newer with CUDA
-- CUDA toolkit with `nvcc`
-- Ninja
+- CUDA toolkit 12.6 or newer with `nvcc`
 - Diffusers 0.36 or newer
-- Transformers 4.41.2 or newer
-- PEFT
-- Accelerate 0.31 or newer for CPU offload examples
-- Hugging Face Hub, Safetensors, and Packaging
 
 The build detects the local GPU architecture by default. Supported targets are
 `sm75`, `sm80`, `sm86`, `sm89`, `sm120a`, and `sm121a`, subject to the
-installed CUDA toolkit version.
+installed CUDA toolkit version. CUDA 12.6 or newer is the documented minimum;
+`sm120a` requires CUDA 12.8 or newer, and `sm121a` requires CUDA 13.0 or newer.
 
 The Python package metadata installs the runtime Python dependencies. The CUDA
 toolkit and a compatible PyTorch CUDA build must already be available in the
 environment before building from source.
+
+> **CUDA version note:** Source installs and wheel builds compile the native
+> `nunchaku_lite._C` CUDA extension. Use a CUDA toolkit with `nvcc` that is
+> compatible with your installed PyTorch CUDA build. CUDA 12.6 or newer is the
+> documented minimum; Blackwell `sm120a` requires CUDA 12.8 or newer, and
+> `sm121a` requires CUDA 13.0 or newer.
 
 ## Installation
 

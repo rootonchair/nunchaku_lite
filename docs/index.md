@@ -1,5 +1,9 @@
 # nunchaku_lite
 
+<p align="center">
+  <img src="assets/logo.svg" alt="nunchaku_lite" width="640">
+</p>
+
 `nunchaku_lite` loads Nunchaku-quantized image generation components into
 standard Diffusers pipelines. It keeps the integration surface small: construct
 the target Diffusers pipeline, replace only the quantized transformer or UNet,
@@ -25,4 +29,4 @@ Diffusers code.
 | SDXL and SDXL-Turbo | `sdxl` | Not yet |
 | Z-Image Turbo | `z_image` | Yes |
 
-Runnable model examples are stored in the repository under `examples/`.
+Runnable model guides are stored under [Supported models](models/flux.md).

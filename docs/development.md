@@ -80,7 +80,7 @@ nunchaku_lite/
 native/            Vendored native kernel sources and headers
 benchmarks/        End-to-end benchmark scripts
 docs/              Project documentation
-examples/          Model-specific quick-start guides
+docs/models/       Model-specific quick-start guides
 tests/             Unit tests
 ```
 

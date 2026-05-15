@@ -10,6 +10,8 @@ edit_uri: edit/main/docs/
 theme:
   name: material
   language: en
+  logo: assets/logo-symbol.svg
+  favicon: assets/favicon.png
   palette:
     - media: "(prefers-color-scheme)"
       toggle:
@@ -67,11 +69,22 @@ markdown_extensions:
       alternate_style: true
 
 nav:
-  - Home: index.md
-  - API Reference: api.md
+  - Home:
+      - Overview: index.md
+      - Installation: installation.md
+      - Quick Start: quick_start.md
+  - Documentation:
+      - Overview: overview.md
+      - Supported models:
+          - FLUX.1: models/flux.md
+          - FLUX.2 Klein: models/flux2.md
+          - Qwen-Image: models/qwen_image.md
+          - SDXL: models/sdxl.md
+          - Z-Image Turbo: models/z_image.md
+      - API Reference: api.md
+      - Roadmap: roadmap.md
+      - Documentation Deployment: deployment.md
   - Development: development.md
-  - Roadmap: roadmap.md
-  - Documentation Deployment: deployment.md
 
 extra:
   social:

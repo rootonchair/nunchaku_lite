@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="65 66 185 185" role="img" aria-labelledby="title desc">
+  <title id="title">nunchaku_lite symbol</title>
+  <desc id="desc">A lightweight lowercase n mark built from nunchaku handles and a chain.</desc>
+  <defs>
+    <linearGradient id="lite-accent" x1="90" y1="42" x2="238" y2="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#00e0c6"/>
+      <stop offset="1" stop-color="#4f7cff"/>
+    </linearGradient>
+    <linearGradient id="lite-bg" x1="65" y1="66" x2="250" y2="251" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#dbe4ee"/>
+      <stop offset="1" stop-color="#f2f5f9"/>
+    </linearGradient>
+    <style>
+      .handle {
+        stroke: #10141f;
+        fill: none;
+        stroke-width: 7;
+      }
+
+      .handle-accent {
+        fill: none;
+        stroke: url(#lite-accent);
+        stroke-linecap: round;
+        stroke-width: 8;
+      }
+
+      .chain {
+        fill: none;
+        stroke: #10141f;
+        stroke-linecap: round;
+        stroke-width: 8;
+      }
+    </style>
+  </defs>
+
+  <circle cx="157.5" cy="159.5" r="92" fill="url(#lite-bg)" opacity=".14"/>
+
+  <g transform="translate(42 28)">
+    <path class="handle-accent" d="M84 82c24-17 59-15 76 16"/>
+    <rect class="handle" x="52" y="74" width="20" height="124" rx="10"/>
+    <rect class="handle" x="156" y="102" width="20" height="96" rx="10"/>
+    <path class="chain" d="M62 84c0-37 104-37 104 28"/>
+    <path class="handle-accent" d="M62 172V100"/>
+    <path class="handle-accent" d="M166 172v-52"/>
+  </g>
+</svg>
