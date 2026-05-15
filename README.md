@@ -6,6 +6,9 @@
   <a href="https://github.com/rootonchair/nunchaku_lite/actions/workflows/cpu-tests.yml">
     <img src="https://github.com/rootonchair/nunchaku_lite/actions/workflows/cpu-tests.yml/badge.svg" alt="CPU Tests">
   </a>
+  <a href="https://nunchaku-lite.readthedocs.io/en/latest/">
+    <img src="https://readthedocs.org/projects/nunchaku-lite/badge/?version=latest" alt="Documentation Status">
+  </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0">
   </a>
@@ -207,8 +210,10 @@ org-or-user/repo-name/path/to/checkpoint.safetensors
 
 | Topic | Link |
 | --- | --- |
+| Hosted documentation | [nunchaku-lite.readthedocs.io](https://nunchaku-lite.readthedocs.io/en/latest/) |
 | Public API and runtime LoRA usage | [docs/api.md](docs/api.md) |
 | Development, testing, and adapter authoring | [docs/development.md](docs/development.md) |
+| Documentation deployment flow | [docs/deployment.md](docs/deployment.md) |
 | Supported models and feature backlog | [docs/roadmap.md](docs/roadmap.md) |
 | Benchmarks | [benchmarks/README.md](benchmarks/README.md) |
 
