@@ -77,10 +77,10 @@ export NUNCHAKU_BUILD_WHEELS=1
 export NUNCHAKU_CUDA_VERSION=13.0
 export NUNCHAKU_INSTALL_MODE=ALL
 export NUNCHAKU_LITE_RELEASE_VERSION=0.1.0
-export NUNCHAKU_NVCC_THREADS=1
+export NUNCHAKU_NVCC_THREADS=2
 export NUNCHAKU_TORCH_CUDA_TAG=cu130
 export NUNCHAKU_TORCH_VERSION=2.11.0
-export MAX_JOBS=1
+export MAX_JOBS=2
 export CIBW_BUILD=cp313-manylinux_x86_64
 
 python -m cibuildwheel --platform linux --output-dir wheelhouse

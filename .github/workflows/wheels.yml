@@ -145,10 +145,10 @@ jobs:
             NUNCHAKU_CUDA_VERSION=${{ matrix.torch_cuda.cuda_version }}
             NUNCHAKU_INSTALL_MODE=ALL
             NUNCHAKU_LITE_RELEASE_VERSION=${{ needs.validate-version.outputs.release-version }}
-            NUNCHAKU_NVCC_THREADS=1
+            NUNCHAKU_NVCC_THREADS=2
             NUNCHAKU_TORCH_CUDA_TAG=${{ matrix.torch_cuda.cuda_tag }}
             NUNCHAKU_TORCH_VERSION=${{ matrix.torch_cuda.torch_version }}
-            MAX_JOBS=1
+            MAX_JOBS=2
             PATH=/usr/local/cuda-${{ matrix.torch_cuda.cuda_version }}/bin:$PATH
         run: python -m cibuildwheel --output-dir wheelhouse
 
