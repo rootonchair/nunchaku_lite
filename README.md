@@ -34,13 +34,13 @@ component matches one of the built-in adapters below. Checkpoints should be SVDQ
 W4A4 Nunchaku v2 `.safetensors` files in INT4 or FP4 format. Full runnable
 guides live under `examples/`.
 
-| Model family | Diffusers component | Adapter target | Runtime LoRA | Guide | Coverage |
-| --- | --- | --- | --- | --- | --- |
-| FLUX.1 | `FluxTransformer2DModel` | `flux` | Yes | [examples/flux.md](examples/flux.md) | FLUX.1-schnell pipeline loading plus FLUX.1-dev LoRA examples. |
-| FLUX.2 Klein | `Flux2Transformer2DModel` | `flux2` | Yes | [examples/flux2.md](examples/flux2.md) | FLUX.2 Klein pipeline loading plus Flux2 LoRA examples. |
-| Qwen-Image and Qwen-Image-Edit | `QwenImageTransformer2DModel` | `qwen_image` | Yes | [examples/qwen_image.md](examples/qwen_image.md) | Qwen-Image plus Qwen-Image-Edit-2509 base, 4-step distilled, and 8-step distilled examples. |
-| SDXL and SDXL-Turbo | `UNet2DConditionModel` | `sdxl` | Not yet | [examples/sdxl.md](examples/sdxl.md) | Pipeline loading for quantized SDXL and SDXL-Turbo UNets. |
-| Z-Image Turbo | `ZImageTransformer2DModel` | `z_image` | Yes | [examples/z_image.md](examples/z_image.md) | Z-Image Turbo pipeline loading plus Z-Image LoRA examples. |
+| Model family | Coverage | Runtime LoRA | Guide | Features |
+| --- | --- | --- | --- | --- |
+| FLUX.1 | FLUX.1-schnell and FLUX.1-dev | Yes | [examples/flux.md](examples/flux.md) | Pipeline loading, INT4/FP4 checkpoints, Diffusers-format LoRA loading, strength control, multi-LoRA composition, reset, and unload. |
+| FLUX.2 Klein | FLUX.2 Klein | Yes | [examples/flux2.md](examples/flux2.md) | Pipeline loading, INT4/FP4 checkpoints, runtime LoRA, and ComfyUI Flux2 LoRA key conversion. |
+| Qwen-Image and Qwen-Image-Edit | Qwen-Image, Qwen-Image-Lightning, Qwen-Image-Edit, and Qwen-Image-Edit-2509 | Yes | [examples/qwen_image.md](examples/qwen_image.md) | Pipeline loading, INT4/FP4 checkpoints, low-VRAM examples, Lightning LoRA workflows, and edit-pipeline examples. |
+| SDXL and SDXL-Turbo | SDXL and SDXL-Turbo | Not yet | [examples/sdxl.md](examples/sdxl.md) | Pipeline loading for quantized UNet checkpoints. |
+| Z-Image Turbo | Z-Image Turbo | Yes | [examples/z_image.md](examples/z_image.md) | Pipeline loading, INT4/FP4 checkpoints, runtime LoRA, and dense AdaLN modulation LoRA branches. |
 
 The Qwen low-VRAM guides use `enable_model_cpu_offload()`, which requires
 `accelerate`.
