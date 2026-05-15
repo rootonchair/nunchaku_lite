@@ -78,35 +78,41 @@ jobs:
           PY
 
   wheels:
-    name: Wheels / Torch ${{ matrix.torch-version }} / ${{ matrix.cuda-tag }}
+    name: Wheels / ${{ matrix.python_build }} / Torch ${{ matrix.torch_cuda.torch_version }} / ${{ matrix.torch_cuda.cuda_tag }}
     runs-on: ubuntu-latest
     needs: validate-version
 
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix:
-        include:
-          - torch-version: "2.9.1"
-            cuda-tag: cu128
-            cuda-version: "12.8"
-          - torch-version: "2.9.1"
-            cuda-tag: cu130
-            cuda-version: "13.0"
-          - torch-version: "2.10.0"
-            cuda-tag: cu128
-            cuda-version: "12.8"
-          - torch-version: "2.10.0"
-            cuda-tag: cu130
-            cuda-version: "13.0"
-          - torch-version: "2.11.0"
-            cuda-tag: cu128
-            cuda-version: "12.8"
-          - torch-version: "2.11.0"
-            cuda-tag: cu130
-            cuda-version: "13.0"
-          - torch-version: "2.12.0"
-            cuda-tag: cu130
-            cuda-version: "13.0"
+        python_build:
+          - cp310-manylinux_x86_64
+          - cp311-manylinux_x86_64
+          - cp312-manylinux_x86_64
+          - cp313-manylinux_x86_64
+        torch_cuda:
+          - torch_version: "2.9.1"
+            cuda_tag: cu128
+            cuda_version: "12.8"
+          - torch_version: "2.9.1"
+            cuda_tag: cu130
+            cuda_version: "13.0"
+          - torch_version: "2.10.0"
+            cuda_tag: cu128
+            cuda_version: "12.8"
+          - torch_version: "2.10.0"
+            cuda_tag: cu130
+            cuda_version: "13.0"
+          - torch_version: "2.11.0"
+            cuda_tag: cu128
+            cuda_version: "12.8"
+          - torch_version: "2.11.0"
+            cuda_tag: cu130
+            cuda_version: "13.0"
+          - torch_version: "2.12.0"
+            cuda_tag: cu130
+            cuda_version: "13.0"
 
     steps:
       - name: Check out repository
@@ -127,23 +133,29 @@ jobs:
 
       - name: Build wheels
         env:
+          CIBW_BUILD: ${{ matrix.python_build }}
           CIBW_ENVIRONMENT_LINUX: >
-            CUDA_HOME=/usr/local/cuda-${{ matrix.cuda-version }}
+            CC=/opt/rh/gcc-toolset-13/root/usr/bin/gcc
+            CUDA_HOME=/usr/local/cuda-${{ matrix.torch_cuda.cuda_version }}
+            CUDAHOSTCXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
             CUDA_VISIBLE_DEVICES=""
-            LD_LIBRARY_PATH=/usr/local/cuda-${{ matrix.cuda-version }}/lib64:$LD_LIBRARY_PATH
+            CXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+            LD_LIBRARY_PATH=/usr/local/cuda-${{ matrix.torch_cuda.cuda_version }}/lib64:$LD_LIBRARY_PATH
             NUNCHAKU_BUILD_WHEELS=1
-            NUNCHAKU_CUDA_VERSION=${{ matrix.cuda-version }}
+            NUNCHAKU_CUDA_VERSION=${{ matrix.torch_cuda.cuda_version }}
             NUNCHAKU_INSTALL_MODE=ALL
             NUNCHAKU_LITE_RELEASE_VERSION=${{ needs.validate-version.outputs.release-version }}
-            NUNCHAKU_TORCH_CUDA_TAG=${{ matrix.cuda-tag }}
-            NUNCHAKU_TORCH_VERSION=${{ matrix.torch-version }}
-            PATH=/usr/local/cuda-${{ matrix.cuda-version }}/bin:$PATH
+            NUNCHAKU_NVCC_THREADS=1
+            NUNCHAKU_TORCH_CUDA_TAG=${{ matrix.torch_cuda.cuda_tag }}
+            NUNCHAKU_TORCH_VERSION=${{ matrix.torch_cuda.torch_version }}
+            MAX_JOBS=1
+            PATH=/usr/local/cuda-${{ matrix.torch_cuda.cuda_version }}/bin:$PATH
         run: python -m cibuildwheel --output-dir wheelhouse
 
       - name: Upload wheel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: nunchaku-lite-wheels-torch-${{ matrix.torch-version }}-${{ matrix.cuda-tag }}
+          name: nunchaku-lite-wheels-${{ matrix.python_build }}-torch-${{ matrix.torch_cuda.torch_version }}-${{ matrix.torch_cuda.cuda_tag }}
           path: wheelhouse/*.whl
           if-no-files-found: error
 

@@ -106,6 +106,7 @@ if __name__ == "__main__":
 
     gcc_flags = ["-DENABLE_BF16=1", "-DBUILD_NUNCHAKU=1", "-fvisibility=hidden", "-g", "-std=c++20", "-UNDEBUG", "-Og"]
     msvc_flags = ["/DENABLE_BF16=1", "/DBUILD_NUNCHAKU=1", "/std:c++20", "/UNDEBUG", "/Zc:__cplusplus", "/FS"]
+    nvcc_threads = os.getenv("NUNCHAKU_NVCC_THREADS", str(len(sm_targets)))
     nvcc_flags = [
         "-DENABLE_BF16=1",
         "-DBUILD_NUNCHAKU=1",
@@ -122,7 +123,7 @@ if __name__ == "__main__":
         "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
         "-U__CUDA_NO_BFLOAT162_OPERATORS__",
         "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-        f"--threads={len(sm_targets)}",
+        f"--threads={nvcc_threads}",
         "--expt-relaxed-constexpr",
         "--expt-extended-lambda",
     ]

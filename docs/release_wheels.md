@@ -60,6 +60,9 @@ contains every supported SM target for the selected CUDA toolkit. CUDA 12.8
 builds include `sm75`, `sm80`, `sm86`, `sm89`, and `sm120a`. CUDA 13.0 builds
 also include `sm121a`.
 
+CI builds one Python wheel per job and limits CUDA compiler parallelism to keep
+GitHub-hosted runners from being terminated during heavy CUDA builds.
+
 ## Local Reproduction
 
 Install `cibuildwheel`, choose a Torch/CUDA pair, and run the Linux build. Set
@@ -74,8 +77,11 @@ export NUNCHAKU_BUILD_WHEELS=1
 export NUNCHAKU_CUDA_VERSION=13.0
 export NUNCHAKU_INSTALL_MODE=ALL
 export NUNCHAKU_LITE_RELEASE_VERSION=0.1.0
+export NUNCHAKU_NVCC_THREADS=1
 export NUNCHAKU_TORCH_CUDA_TAG=cu130
 export NUNCHAKU_TORCH_VERSION=2.11.0
+export MAX_JOBS=1
+export CIBW_BUILD=cp313-manylinux_x86_64
 
 python -m cibuildwheel --platform linux --output-dir wheelhouse
 ```
