@@ -44,7 +44,8 @@ fi
   "cuda-nvcc-${cuda_package_version}" \
   gcc-toolset-13-gcc \
   gcc-toolset-13-gcc-c++ \
-  "libcublas-devel-${cuda_package_version}"
+  "libcublas-devel-${cuda_package_version}" \
+  "libcusparse-devel-${cuda_package_version}"
 
 "/opt/rh/gcc-toolset-13/root/usr/bin/g++" --version
 "/usr/local/cuda-${cuda_version}/bin/nvcc" --version
