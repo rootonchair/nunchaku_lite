@@ -45,6 +45,7 @@ fi
   gcc-toolset-13-gcc \
   gcc-toolset-13-gcc-c++ \
   "libcublas-devel-${cuda_package_version}" \
+  "libcusolver-devel-${cuda_package_version}" \
   "libcusparse-devel-${cuda_package_version}"
 
 "/opt/rh/gcc-toolset-13/root/usr/bin/g++" --version
