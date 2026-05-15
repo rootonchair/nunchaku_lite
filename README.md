@@ -44,7 +44,7 @@ The full `nunchaku` package in this repository exposes a broader set of model-sp
 - [x] Qwen-Image runtime LoRA support, covering Qwen-Image and Qwen-Image-Edit families.
 - [x] Flux2 runtime LoRA support, including ComfyUI Flux2 LoRA key conversion.
 - [ ] SDXL runtime LoRA support for quantized UNet attention and MLP projections.
-- [ ] Z-Image runtime LoRA support for quantized transformer projections.
+- [x] Z-Image runtime LoRA support, including dense AdaLN modulation LoRA branches.
 - [ ] FLUX IP-Adapter integration.
 - [ ] FLUX PuLID pipeline or patching support.
 - [ ] FLUX ControlNet workflow coverage for Canny, Depth, Fill, and ControlNet-Union variants.
@@ -89,7 +89,7 @@ Full quick-start scripts live under `examples/` so the main README stays focused
 | Model | Example | Notes |
 | --- | --- | --- |
 | Qwen-Image INT4 / FP4 | [examples/qwen_image.md](examples/qwen_image.md) | Qwen-Image plus Qwen-Image-Edit-2509 base, 4-step distilled, and 8-step distilled examples. |
-| Z-Image Turbo INT4 / FP4 | [examples/z_image.md](examples/z_image.md) | Pipeline loader flow. |
+| Z-Image Turbo INT4 / FP4 | [examples/z_image.md](examples/z_image.md) | Pipeline loader plus Z-Image LoRA examples. |
 | FLUX.1-schnell INT4 / FP4 | [examples/flux.md](examples/flux.md) | Pipeline loader plus FLUX LoRA examples. |
 | FLUX.2 Klein INT4 / FP4 | [examples/flux2.md](examples/flux2.md) | Pipeline loader plus Flux2 LoRA examples. |
 | SDXL / SDXL-Turbo INT4 | [examples/sdxl.md](examples/sdxl.md) | Pipeline loader flow for a quantized UNet. |
@@ -454,6 +454,15 @@ PYTHONPATH=src pytest -q -m full_inference tests/test_full_inference_flux2.py
 ```
 
 The FLUX.2 full inference test defaults to the INT4 `tonera/FLUX.2-klein-9B-Nunchaku` checkpoint and the ComfyUI-format `artificialguybr/PIXELART-REDMOND-FLUXKLEIN9B` LoRA. Override `NUNCHAKU_LITE_FLUX2_FULL_INFERENCE_*` environment variables to use another compatible checkpoint or LoRA.
+
+Run the opt-in Z-Image Turbo runtime LoRA full inference test:
+
+```bash
+NUNCHAKU_LITE_RUN_FULL_INFERENCE=1 \
+PYTHONPATH=src pytest -q -m full_inference tests/test_full_inference_z_image.py
+```
+
+The Z-Image full inference test defaults to the INT4 `nunchaku-ai/nunchaku-z-image-turbo` checkpoint and the `tarn59/pixel_art_style_lora_z_image_turbo` LoRA. Override `NUNCHAKU_LITE_Z_IMAGE_FULL_INFERENCE_*` environment variables to use another compatible checkpoint or LoRA.
 
 Build the extension in place:
 

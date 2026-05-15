@@ -7,6 +7,7 @@ from pathlib import Path
 from types import MethodType
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from ..models.linear import AWQW4A16Linear, SVDQW4A4Linear
@@ -242,6 +243,51 @@ class NunchakuLoraMixin:
         raise NotImplementedError
 
 
+class DenseRuntimeLoraLinear(nn.Linear):
+    """Dense linear layer with runtime LoRA branches managed by Nunchaku Lite."""
+
+    @classmethod
+    def from_linear(cls, linear: nn.Linear) -> "DenseRuntimeLoraLinear":
+        """Wrap an existing dense linear while preserving its state-dict keys.
+
+        Args:
+            linear: Source dense linear module.
+        """
+
+        module = cls(
+            linear.in_features,
+            linear.out_features,
+            bias=linear.bias is not None,
+            device=linear.weight.device,
+            dtype=linear.weight.dtype,
+        )
+        module.weight = linear.weight
+        module.bias = linear.bias
+        return module
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        """Apply the dense projection plus any active runtime LoRA branch.
+
+        Args:
+            input: Activation tensor whose last dimension is ``in_features``.
+        """
+
+        output = F.linear(input, self.weight, self.bias)
+        lora_down = getattr(self, "_nunchaku_lite_lora_down", None)
+        lora_up = getattr(self, "_nunchaku_lite_lora_up", None)
+        if lora_down is None or lora_up is None or lora_down.shape[1] == 0:
+            return output
+        if lora_down.device != input.device:
+            lora_down = lora_down.to(input.device)
+            self._nunchaku_lite_lora_down = lora_down
+        if lora_up.device != input.device:
+            lora_up = lora_up.to(input.device)
+            self._nunchaku_lite_lora_up = lora_up
+        lora = torch.matmul(input.to(lora_down.dtype), lora_down)
+        lora = torch.matmul(lora, lora_up.transpose(0, 1))
+        return output + lora.to(output.dtype)
+
+
 class NunchakuPipelineLoraMixin:
     """Mixin-style provider for Diffusers-compatible pipeline LoRA APIs."""
 
@@ -276,10 +322,15 @@ class NunchakuPipelineLoraMixin:
             return_alphas=True,
             **kwargs,
         )
+        network_alphas = None
         if len(result) == 3:
             state_dict, network_alphas, _metadata = result
         else:
-            state_dict, network_alphas = result
+            state_dict, maybe_alphas_or_metadata = result
+            if isinstance(maybe_alphas_or_metadata, dict) and all(
+                isinstance(value, torch.Tensor) for value in maybe_alphas_or_metadata.values()
+            ):
+                network_alphas = maybe_alphas_or_metadata
         component_name = getattr(self, "_nunchaku_lite_lora_component_name", "transformer")
         raise_if_text_encoder_lora(state_dict)
         transformer_state = {
@@ -664,11 +715,24 @@ def ensure_lora_base_state(transformer: nn.Module) -> None:
         if isinstance(module, SVDQW4A4Linear):
             base_state[f"{name}.proj_down"] = module.proj_down.detach().clone()
             base_state[f"{name}.proj_up"] = module.proj_up.detach().clone()
-        else:
+        elif isinstance(module, AWQW4A16Linear):
             device = module.qweight.device
             dtype = module.wscales.dtype
             base_state[f"{name}.proj_down"] = torch.empty(module.in_features, 0, device=device, dtype=dtype)
             base_state[f"{name}.proj_up"] = torch.empty(module.out_features, 0, device=device, dtype=dtype)
+        else:
+            base_state[f"{name}.proj_down"] = torch.empty(
+                module.in_features,
+                0,
+                device=module.weight.device,
+                dtype=module.weight.dtype,
+            )
+            base_state[f"{name}.proj_up"] = torch.empty(
+                module.out_features,
+                0,
+                device=module.weight.device,
+                dtype=module.weight.dtype,
+            )
     transformer._nunchaku_lite_lora_base_state = base_state
 
 
@@ -732,6 +796,8 @@ def recompose_loras(transformer: nn.Module) -> None:
                             f"LoRA rank mismatch for {name}: "
                             f"proj_down={tuple(down_logical.shape)}, proj_up={tuple(up_logical.shape)}"
                         )
+                    down_logical = down_logical.to(device=logical_downs[0].device, dtype=logical_downs[0].dtype)
+                    up_logical = up_logical.to(device=logical_ups[0].device, dtype=logical_ups[0].dtype)
                     logical_downs.append(down_logical * float(entry["strength"]))
                     logical_ups.append(up_logical)
                 down = pack_lowrank_weight(torch.cat(logical_downs, dim=0), down=True)
@@ -763,8 +829,14 @@ def recompose_loras(transformer: nn.Module) -> None:
                 lora_up = lora_up.to(device=up.device, dtype=up.dtype)
                 down = torch.cat([down, lora_down], dim=1)
                 up = torch.cat([up, lora_up], dim=1)
-            down = down.to(device=module.qweight.device, dtype=module.wscales.dtype)
-            up = up.to(device=module.qweight.device, dtype=module.wscales.dtype)
+            if isinstance(module, AWQW4A16Linear):
+                device = module.qweight.device
+                dtype = module.wscales.dtype
+            else:
+                device = module.weight.device
+                dtype = module.weight.dtype
+            down = down.to(device=device, dtype=dtype)
+            up = up.to(device=device, dtype=dtype)
             module._nunchaku_lite_lora_down = down
             module._nunchaku_lite_lora_up = up
 
@@ -789,16 +861,27 @@ def awq_modules(transformer: nn.Module) -> dict[str, AWQW4A16Linear]:
     return {name: module for name, module in transformer.named_modules() if isinstance(module, AWQW4A16Linear)}
 
 
-def lora_modules(transformer: nn.Module) -> dict[str, SVDQW4A4Linear | AWQW4A16Linear]:
-    """Return every quantized linear module that can receive runtime LoRA tensors.
+def dense_lora_modules(transformer: nn.Module) -> dict[str, DenseRuntimeLoraLinear]:
+    """Return dense linear modules addressable by runtime LoRA conversion.
 
     Args:
         transformer: Patched transformer to scan by module name.
     """
 
-    modules: dict[str, SVDQW4A4Linear | AWQW4A16Linear] = {}
+    return {name: module for name, module in transformer.named_modules() if isinstance(module, DenseRuntimeLoraLinear)}
+
+
+def lora_modules(transformer: nn.Module) -> dict[str, SVDQW4A4Linear | AWQW4A16Linear | DenseRuntimeLoraLinear]:
+    """Return every linear module that can receive runtime LoRA tensors.
+
+    Args:
+        transformer: Patched transformer to scan by module name.
+    """
+
+    modules: dict[str, SVDQW4A4Linear | AWQW4A16Linear | DenseRuntimeLoraLinear] = {}
     modules.update(svdq_modules(transformer))
     modules.update(awq_modules(transformer))
+    modules.update(dense_lora_modules(transformer))
     return modules
 
 
@@ -851,9 +934,9 @@ def svdq_down_to_logical(tensor: torch.Tensor, module: SVDQW4A4Linear, module_na
         module_name: Target module name used in validation errors.
     """
 
+    if looks_like_packed_lowrank(tensor, feature_dim=module.in_features):
+        return unpack_lowrank_weight(tensor, down=True)[:, : module.in_features].contiguous()
     fitted = fit_lora_tensor(tensor, module.in_features, down=True, module_name=module_name)
-    if looks_like_packed_lowrank(fitted, feature_dim=module.in_features):
-        return unpack_lowrank_weight(fitted, down=True)
     return fitted.transpose(0, 1).contiguous()
 
 
@@ -866,9 +949,9 @@ def svdq_up_to_logical(tensor: torch.Tensor, module: SVDQW4A4Linear, module_name
         module_name: Target module name used in validation errors.
     """
 
+    if looks_like_packed_lowrank(tensor, feature_dim=module.out_features):
+        return unpack_lowrank_weight(tensor, down=False)[: module.out_features].contiguous()
     fitted = fit_lora_tensor(tensor, module.out_features, down=False, module_name=module_name)
-    if looks_like_packed_lowrank(fitted, feature_dim=module.out_features):
-        return unpack_lowrank_weight(fitted, down=False)
     return fitted.contiguous()
 
 
@@ -880,7 +963,7 @@ def looks_like_packed_lowrank(tensor: torch.Tensor, feature_dim: int) -> bool:
         feature_dim: Expected input/output feature dimension for the module.
     """
 
-    return tensor.shape[0] == feature_dim and feature_dim % 16 == 0 and tensor.shape[1] % 16 == 0
+    return tensor.shape[0] >= feature_dim and tensor.shape[0] % 16 == 0 and tensor.shape[1] % 16 == 0
 
 
 def pack_lowrank_weight(weight: torch.Tensor, down: bool) -> torch.Tensor:
