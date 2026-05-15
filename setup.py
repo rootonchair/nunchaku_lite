@@ -167,7 +167,15 @@ if __name__ == "__main__":
         python_requires=">=3.10",
         package_dir={"": "src"},
         packages=setuptools.find_packages(where="src", include=["nunchaku_lite", "nunchaku_lite.*"]),
-        install_requires=["torch>=2.7", "diffusers>=0.36", "safetensors", "huggingface-hub>=0.34"],
+        install_requires=[
+            "torch>=2.7",
+            "diffusers>=0.36",
+            "safetensors",
+            "huggingface-hub>=0.34",
+            "packaging>=23",
+            "transformers>=4.41.2",
+            "accelerate>=0.31",
+        ],
         ext_modules=[extension],
         cmdclass={"build_ext": CustomBuildExtension},
     )

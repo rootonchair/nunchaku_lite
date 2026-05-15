@@ -1,9 +1,6 @@
 recursive-include src/nunchaku_lite *.py *.json
 recursive-include src/nunchaku_lite/csrc *.cpp *.h *.hpp *.ipp *.cu *.cuh
 recursive-include native/src *.cpp *.h *.hpp *.ipp *.cu *.cuh
-recursive-include native/third_party/cutlass/include *.cpp *.h *.hpp *.ipp *.cu *.cuh
-recursive-include native/third_party/json/include *.cpp *.h *.hpp *.ipp
-recursive-include native/third_party/mio/include *.cpp *.h *.hpp *.ipp
 recursive-include native/third_party/spdlog/include *.cpp *.h *.hpp *.ipp
 
 include setup.py
