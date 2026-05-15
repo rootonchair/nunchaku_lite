@@ -10,25 +10,27 @@ from diffusers.utils.state_dict_utils import convert_unet_state_dict_to_peft
 from torch import nn
 
 from ..adapters.flux import convert_flux_state_dict
-from ..models.linear import AWQW4A16Linear, SVDQW4A4Linear
-from .base import (
+from ..linear import AWQW4A16Linear, SVDQW4A4Linear
+from .core.runtime import (
     NunchakuLoraMixin,
     load_lora_state_dict,
+)
+from .core.layout import (
     lora_modules,
     pack_lowrank_weight,
     pad_lora_tensor,
 )
-from .common import (
+from .core.convert import (
     LORA_ERROR_LABEL,
     QKV_PROJECTION_SPECS,
     fuse_projection_branches,
     group_fused_projection_pairs,
     is_nunchaku_lite_lora_state_dict,
-    normalize_nunchaku_lora_keys_and_validate,
+    normalize_nunchaku_lora_state_dict,
     strip_transformer_prefix,
     validate_nunchaku_lora_state_dict,
 )
-from .peft import apply_network_alphas, extract_network_alphas, normalize_float_tensor, peft_lora_pairs
+from .core.peft import apply_network_alphas, extract_network_alphas, normalize_float_tensor, peft_lora_pairs
 
 
 FLUX_KOHYA_KEY_REPLACEMENTS = (
@@ -74,7 +76,7 @@ class NunchakuFluxTransformerLoraMixin(NunchakuLoraMixin):
         state_dict = load_lora_state_dict(path_or_state_dict)
         if is_nunchaku_lite_lora_state_dict(state_dict):
             flux_converted_state_dict = convert_flux_state_dict(state_dict)
-            return normalize_nunchaku_lora_keys_and_validate(flux_converted_state_dict, self)
+            return normalize_nunchaku_lora_state_dict(flux_converted_state_dict, self)
         return convert_flux_diffusers_lora_state_dict(state_dict, self)
 
     def fuse_lora(self, *args, **kwargs) -> None:

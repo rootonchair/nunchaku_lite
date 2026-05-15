@@ -8,14 +8,10 @@ from diffusers.loaders.lora_pipeline import ZImageLoraLoaderMixin
 from diffusers.models.transformers.transformer_z_image import ZImageTransformer2DModel
 
 from nunchaku_lite.adapters.z_image import ZImageAdapter
-from nunchaku_lite.lora.base import (
-    DenseRuntimeLoraLinear,
-    NunchakuPipelineLoraMixin,
-    bind_pipeline_lora_methods,
-    unpack_lowrank_weight,
-)
+from nunchaku_lite.linear import DenseRuntimeLoraLinear, SVDQW4A4Linear
+from nunchaku_lite.lora.core.layout import unpack_lowrank_weight
+from nunchaku_lite.lora.core.runtime import NunchakuPipelineLoraMixin, bind_pipeline_lora_methods
 from nunchaku_lite.lora.z_image import normalize_z_image_diffusers_lora_state_dict
-from nunchaku_lite.models.linear import SVDQW4A4Linear
 
 from test_z_image_adapter import make_tiny_z_image_transformer
 

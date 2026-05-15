@@ -17,7 +17,7 @@ from diffusers.models.transformers.transformer_qwenimage import (
 )
 
 from ..core import PatchOptions, register_adapter
-from ..models.linear import AWQW4A16Linear, SVDQW4A4Linear
+from ..linear import AWQW4A16Linear, SVDQW4A4Linear
 from ..ops.fused import fused_gelu_mlp
 from .common import (
     SVDQPatchContext,
@@ -567,7 +567,7 @@ class QwenImageAdapter:
         transformer._nunchaku_lite_qwen_image_original_forward = transformer.forward
         transformer.forward = types.MethodType(lite_qwen_image_forward, transformer)
         finalize_svdq_checkpoint(transformer, checkpoint_state, context)
-        from ..lora.base import bind_transformer_lora_methods
+        from ..lora.core.runtime import bind_transformer_lora_methods
         from ..lora.qwen_image import NunchakuQwenImageLoraMixin
 
         bind_transformer_lora_methods(transformer, NunchakuQwenImageLoraMixin)
@@ -583,7 +583,7 @@ class QwenImageAdapter:
     ) -> None:
         """Attach Qwen-Image pipeline-level runtime APIs."""
 
-        from ..lora.base import NunchakuPipelineLoraMixin, bind_pipeline_lora_methods
+        from ..lora.core.runtime import NunchakuPipelineLoraMixin, bind_pipeline_lora_methods
 
         bind_pipeline_lora_methods(pipeline, NunchakuPipelineLoraMixin)
 

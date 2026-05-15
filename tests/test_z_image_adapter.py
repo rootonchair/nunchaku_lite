@@ -13,7 +13,7 @@ from diffusers.models.transformers.transformer_z_image import ZImageTransformer2
 from nunchaku_lite import patch_transformer
 from nunchaku_lite.adapters.common import NunchakuAttention, patch_attention_module, patch_modules_recursively
 from nunchaku_lite.adapters.z_image import ZImageAdapter
-from nunchaku_lite.models.linear import SVDQW4A4Linear
+from nunchaku_lite.linear import SVDQW4A4Linear
 
 
 def make_tiny_z_image_transformer():

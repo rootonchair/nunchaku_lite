@@ -6,8 +6,8 @@ from dataclasses import dataclass
 
 import torch
 
-from ..models.linear import AWQW4A16Linear, SVDQW4A4Linear
-from .base import (
+from ...linear import AWQW4A16Linear, SVDQW4A4Linear
+from .layout import (
     DenseRuntimeLoraLinear,
     fit_lora_tensor,
     iter_lora_pairs,
@@ -78,35 +78,20 @@ def is_nunchaku_lite_lora_state_dict(
             tensors and should prevent treating mixed inputs as lite format.
     """
 
-    has_lite_key = any(key.endswith((".proj_down", ".proj_up", ".lora_down", ".lora_up")) for key in state_dict)
+    has_nunchaku_key = any(key.endswith((".proj_down", ".proj_up", ".lora_down", ".lora_up")) for key in state_dict)
     has_diffusers_key = any(any(marker in key for marker in diffusers_markers) for key in state_dict)
-    return has_lite_key and not has_diffusers_key
+    return has_nunchaku_key and not has_diffusers_key
 
 
 def normalize_nunchaku_lora_state_dict(
     state_dict: dict[str, torch.Tensor],
     transformer,
 ) -> dict[str, torch.Tensor]:
-    """Normalize standard Nunchaku-format low-rank keys and validate them.
+    """Canonicalize Nunchaku-format LoRA keys, then validate them against a model.
 
     Args:
         state_dict: LoRA tensors with keys ending in ``.proj_down/.proj_up`` or
             older ``.lora_down/.lora_up`` names.
-        transformer: Patched transformer whose quantized linear modules define
-            valid target names and expected input/output feature sizes.
-    """
-
-    return normalize_nunchaku_lora_keys_and_validate(state_dict, transformer)
-
-
-def normalize_nunchaku_lora_keys_and_validate(
-    state_dict: dict[str, torch.Tensor],
-    transformer,
-) -> dict[str, torch.Tensor]:
-    """Canonicalize Nunchaku-format LoRA keys, then validate tensor pairs against a model.
-
-    Args:
-        state_dict: State dict already using Nunchaku-format target names.
         transformer: Patched transformer used to validate module names and
             coerce tensor orientation/shape for each target module.
     """

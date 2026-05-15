@@ -7,12 +7,11 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from .base import (
+from .core.runtime import (
     NunchakuLoraMixin,
     load_lora_state_dict,
-    lora_modules,
 )
-from .common import (
+from .core.convert import (
     LORA_ERROR_LABEL,
     QKV_PROJECTION_SPECS,
     fuse_projection_branches,
@@ -23,7 +22,7 @@ from .common import (
     strip_transformer_prefix,
     validate_nunchaku_lora_state_dict,
 )
-from .peft import (
+from .core.peft import (
     LORA_A_SUFFIX,
     LORA_B_SUFFIX,
     apply_network_alphas,
@@ -31,6 +30,7 @@ from .peft import (
     normalize_float_tensor,
     peft_lora_pairs,
 )
+from .core.layout import lora_modules
 
 
 class NunchakuQwenImageLoraMixin(NunchakuLoraMixin):

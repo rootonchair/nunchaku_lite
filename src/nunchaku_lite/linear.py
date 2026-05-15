@@ -1,11 +1,57 @@
 """Quantized linear modules backed by Nunchaku Lite native kernels."""
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
-from ..ops.gemm import svdq_gemm_w4a4_cuda
-from ..ops.gemv import awq_gemv_w4a16_cuda
-from ..ops.quantize import svdq_quantize_w4a4_act_fuse_lora_cuda
+from .ops.gemm import svdq_gemm_w4a4_cuda
+from .ops.gemv import awq_gemv_w4a16_cuda
+from .ops.quantize import svdq_quantize_w4a4_act_fuse_lora_cuda
+
+
+class DenseRuntimeLoraLinear(nn.Linear):
+    """Dense linear layer with runtime LoRA branches managed by Nunchaku Lite."""
+
+    @classmethod
+    def from_linear(cls, linear: nn.Linear) -> "DenseRuntimeLoraLinear":
+        """Wrap an existing dense linear while preserving its state-dict keys.
+
+        Args:
+            linear: Source dense linear module.
+        """
+
+        module = cls(
+            linear.in_features,
+            linear.out_features,
+            bias=linear.bias is not None,
+            device=linear.weight.device,
+            dtype=linear.weight.dtype,
+        )
+        module.weight = linear.weight
+        module.bias = linear.bias
+        return module
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        """Apply the dense projection plus any active runtime LoRA branch.
+
+        Args:
+            input: Activation tensor whose last dimension is ``in_features``.
+        """
+
+        output = F.linear(input, self.weight, self.bias)
+        lora_down = getattr(self, "_nunchaku_lite_lora_down", None)
+        lora_up = getattr(self, "_nunchaku_lite_lora_up", None)
+        if lora_down is None or lora_up is None or lora_down.shape[1] == 0:
+            return output
+        if lora_down.device != input.device:
+            lora_down = lora_down.to(input.device)
+            self._nunchaku_lite_lora_down = lora_down
+        if lora_up.device != input.device:
+            lora_up = lora_up.to(input.device)
+            self._nunchaku_lite_lora_up = lora_up
+        lora = torch.matmul(input.to(lora_down.dtype), lora_down)
+        lora = torch.matmul(lora, lora_up.transpose(0, 1))
+        return output + lora.to(output.dtype)
 
 
 class SVDQW4A4Linear(nn.Module):

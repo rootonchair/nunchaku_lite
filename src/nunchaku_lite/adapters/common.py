@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 from diffusers.models.attention_processor import Attention
 
-from ..models.linear import SVDQW4A4Linear
+from ..linear import SVDQW4A4Linear
 from ..utils import convert_fp16, patch_scale_key
 
 

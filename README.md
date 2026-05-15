@@ -191,7 +191,7 @@ Runtime LoRA loading accepts Diffusers-format LoRAs and Nunchaku-format low-rank
 Advanced callers using `patch_transformer` directly can bind pipeline LoRA methods manually:
 
 ```python
-from nunchaku_lite.lora.base import NunchakuPipelineLoraMixin, bind_pipeline_lora_methods
+from nunchaku_lite.lora.core.runtime import NunchakuPipelineLoraMixin, bind_pipeline_lora_methods
 
 bind_pipeline_lora_methods(pipe, NunchakuPipelineLoraMixin)
 ```
@@ -300,11 +300,11 @@ from pathlib import Path
 
 import torch
 
-from nunchaku_lite.lora.base import (
+from nunchaku_lite.lora.core.runtime import (
     NunchakuLoraMixin,
     load_lora_state_dict,
 )
-from nunchaku_lite.lora.common import (
+from nunchaku_lite.lora.core.convert import (
     is_nunchaku_lite_lora_state_dict,
     normalize_nunchaku_lora_state_dict,
 )
@@ -325,7 +325,7 @@ class NunchakuMyModelLoraMixin(NunchakuLoraMixin):
 The adapter owns runtime binding. Bind transformer LoRA methods after replacing modules and normalizing checkpoint keys, then bind pipeline APIs from `patch_pipeline`:
 
 ```python
-from nunchaku_lite.lora.base import (
+from nunchaku_lite.lora.core.runtime import (
     NunchakuPipelineLoraMixin,
     bind_pipeline_lora_methods,
     bind_transformer_lora_methods,
@@ -360,18 +360,18 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from nunchaku_lite.models.linear import AWQW4A16Linear, SVDQW4A4Linear
-from nunchaku_lite.lora.base import (
+from nunchaku_lite.linear import AWQW4A16Linear, SVDQW4A4Linear
+from nunchaku_lite.lora.core.runtime import (
     NunchakuLoraMixin,
     load_lora_state_dict,
 )
-from nunchaku_lite.lora.common import (
+from nunchaku_lite.lora.core.convert import (
     FusedProjectionSpec,
     is_nunchaku_lite_lora_state_dict,
     normalize_nunchaku_lora_state_dict,
     strip_transformer_prefix,
 )
-from nunchaku_lite.lora.peft import apply_network_alphas, extract_network_alphas, normalize_float_tensor, peft_lora_pairs
+from nunchaku_lite.lora.core.peft import apply_network_alphas, extract_network_alphas, normalize_float_tensor, peft_lora_pairs
 
 
 QKV_PROJECTION_SPECS = (
@@ -427,7 +427,7 @@ def _map_direct_pair(
     return [(base_name, lora_a.contiguous(), lora_b.contiguous())]
 ```
 
-The converter can reuse shared helpers from `nunchaku_lite.lora.common` and `nunchaku_lite.lora.peft`. Provide model-specific projection specs for fused QKV-style modules, a normalizer for incoming LoRA key formats, and a direct-pair mapper for ordinary projections. Unsupported transformer LoRA keys should fail in conversion instead of being silently ignored.
+The converter can reuse shared helpers from `nunchaku_lite.lora.core.convert` and `nunchaku_lite.lora.core.peft`. Provide model-specific projection specs for fused QKV-style modules, a normalizer for incoming LoRA key formats, and a direct-pair mapper for ordinary projections. Unsupported transformer LoRA keys should fail in conversion instead of being silently ignored.
 
 ## Development
 

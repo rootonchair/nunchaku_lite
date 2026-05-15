@@ -4,7 +4,7 @@ import torch
 from diffusers.models.normalization import RMSNorm as DiffusersRMSNorm
 from torch.nn import RMSNorm
 
-from ..models.linear import SVDQW4A4Linear
+from ..linear import SVDQW4A4Linear
 from ..utils import ceil_divide
 from .gemm import svdq_gemm_w4a4_cuda
 

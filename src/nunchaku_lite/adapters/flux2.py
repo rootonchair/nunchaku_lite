@@ -899,7 +899,7 @@ class Flux2Adapter:
         transformer._nunchaku_lite_flux2_original_forward = transformer.forward
         transformer.forward = types.MethodType(lite_flux2_forward, transformer)
         finalize_svdq_checkpoint(transformer, checkpoint_state, context)
-        from ..lora.base import bind_transformer_lora_methods
+        from ..lora.core.runtime import bind_transformer_lora_methods
         from ..lora.flux2 import NunchakuFlux2TransformerLoraMixin
 
         bind_transformer_lora_methods(transformer, NunchakuFlux2TransformerLoraMixin)
@@ -915,7 +915,7 @@ class Flux2Adapter:
     ) -> None:
         """Attach Flux2 pipeline-level runtime APIs."""
 
-        from ..lora.base import NunchakuPipelineLoraMixin, bind_pipeline_lora_methods
+        from ..lora.core.runtime import NunchakuPipelineLoraMixin, bind_pipeline_lora_methods
 
         bind_pipeline_lora_methods(pipeline, NunchakuPipelineLoraMixin)
 

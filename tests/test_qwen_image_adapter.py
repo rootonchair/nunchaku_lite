@@ -12,7 +12,7 @@ from nunchaku_lite.adapters.qwen_image import (
     NunchakuQwenImageTransformerBlock,
     QwenImageAdapter,
 )
-from nunchaku_lite.models.linear import AWQW4A16Linear, SVDQW4A4Linear
+from nunchaku_lite.linear import AWQW4A16Linear, SVDQW4A4Linear
 
 
 def make_tiny_qwen_image_transformer():

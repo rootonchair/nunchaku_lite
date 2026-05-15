@@ -8,7 +8,7 @@ from safetensors.torch import save_file
 
 from nunchaku_lite import patch_transformer
 from nunchaku_lite.adapters.sdxl import NunchakuSDXLAttention, SDXLAdapter, convert_sdxl_state_dict
-from nunchaku_lite.models.linear import SVDQW4A4Linear
+from nunchaku_lite.linear import SVDQW4A4Linear
 
 
 def make_tiny_sdxl_unet():

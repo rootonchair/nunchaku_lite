@@ -175,7 +175,7 @@ def patch_scale_key(
             scale = state_dict[key]
             state_dict_from_checkpoint[key] = torch.ones(scale.shape, dtype=scale.dtype, device="cpu")
 
-    from .models.linear import SVDQW4A4Linear
+    from .linear import SVDQW4A4Linear
 
     for name, module in transformer_from_config.named_modules():
         if isinstance(module, SVDQW4A4Linear) and module.wtscale is not None:

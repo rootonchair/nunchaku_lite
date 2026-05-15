@@ -3,7 +3,8 @@ from types import MethodType, SimpleNamespace
 import pytest
 import torch
 
-from nunchaku_lite.lora.base import NunchakuPipelineLoraMixin, bind_pipeline_lora_methods, unpack_lowrank_weight
+from nunchaku_lite.lora.core.layout import unpack_lowrank_weight
+from nunchaku_lite.lora.core.runtime import NunchakuPipelineLoraMixin, bind_pipeline_lora_methods
 
 from test_qwen_image_adapter import make_tiny_qwen_image_transformer, patch_tiny_qwen_image
 

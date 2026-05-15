@@ -11,7 +11,7 @@ from diffusers.models.transformers.transformer_z_image import FeedForward as Dif
 from diffusers.models.transformers.transformer_z_image import ZSingleStreamAttnProcessor
 
 from ..core import PatchOptions, register_adapter
-from ..lora.base import DenseRuntimeLoraLinear
+from ..linear import DenseRuntimeLoraLinear
 from ..ops.fused import fused_qkv_norm_rotary
 from .common import (
     SVDQPatchContext,
@@ -180,7 +180,7 @@ class ZImageAdapter:
         transformer.skip_refiners = skip_refiners
         self._install_rope_forward_wrapper(transformer)
         finalize_svdq_checkpoint(transformer, checkpoint_state, context)
-        from ..lora.base import bind_transformer_lora_methods
+        from ..lora.core.runtime import bind_transformer_lora_methods
         from ..lora.z_image import NunchakuZImageTransformerLoraMixin
 
         bind_transformer_lora_methods(transformer, NunchakuZImageTransformerLoraMixin)
@@ -195,7 +195,7 @@ class ZImageAdapter:
     ) -> None:
         """Attach Z-Image pipeline-level runtime LoRA APIs."""
 
-        from ..lora.base import NunchakuPipelineLoraMixin, bind_pipeline_lora_methods
+        from ..lora.core.runtime import NunchakuPipelineLoraMixin, bind_pipeline_lora_methods
 
         bind_pipeline_lora_methods(pipeline, NunchakuPipelineLoraMixin)
 

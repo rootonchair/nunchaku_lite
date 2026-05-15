@@ -17,7 +17,7 @@ import diffusers
 import torch.nn.functional as F
 
 from ..core import PatchOptions, register_adapter
-from ..models.linear import AWQW4A16Linear, SVDQW4A4Linear
+from ..linear import AWQW4A16Linear, SVDQW4A4Linear
 from ..ops.fused import fused_gelu_mlp, fused_qkv_norm_rotary
 from .common import (
     SVDQPatchContext,
@@ -804,7 +804,7 @@ class FluxAdapter:
         checkpoint_state = convert_flux_state_dict(checkpoint_state)
         finalize_svdq_checkpoint(transformer, checkpoint_state, context)
         transformer._nunchaku_lite_flux_patched = True
-        from ..lora.base import bind_transformer_lora_methods
+        from ..lora.core.runtime import bind_transformer_lora_methods
         from ..lora.flux import NunchakuFluxTransformerLoraMixin
 
         bind_transformer_lora_methods(transformer, NunchakuFluxTransformerLoraMixin)
@@ -819,7 +819,7 @@ class FluxAdapter:
     ) -> None:
         """Attach Flux pipeline-level runtime APIs."""
 
-        from ..lora.base import NunchakuPipelineLoraMixin, bind_pipeline_lora_methods
+        from ..lora.core.runtime import NunchakuPipelineLoraMixin, bind_pipeline_lora_methods
 
         bind_pipeline_lora_methods(pipeline, NunchakuPipelineLoraMixin)
 
