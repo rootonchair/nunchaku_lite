@@ -7,7 +7,7 @@
     <img src="https://github.com/rootonchair/nunchaku_lite/actions/workflows/cpu-tests.yml/badge.svg" alt="CPU Tests">
   </a>
   <a href="https://nunchaku-lite.readthedocs.io/en/latest/">
-    <img src="https://readthedocs.org/projects/nunchaku-lite/badge/?version=latest" alt="Documentation Status">
+    <img src="https://img.shields.io/badge/docs-readthedocs.io-blue" alt="Documentation">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0">
