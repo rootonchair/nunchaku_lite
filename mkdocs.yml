@@ -84,7 +84,9 @@ nav:
       - API Reference: api.md
       - Roadmap: roadmap.md
       - Documentation Deployment: deployment.md
-  - Development: development.md
+  - Development:
+      - Development: development.md
+      - Release Wheels: release_wheels.md
 
 extra:
   social:

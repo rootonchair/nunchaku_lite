@@ -6,6 +6,9 @@
   <a href="https://github.com/rootonchair/nunchaku_lite/actions/workflows/cpu-tests.yml">
     <img src="https://github.com/rootonchair/nunchaku_lite/actions/workflows/cpu-tests.yml/badge.svg" alt="CPU Tests">
   </a>
+  <a href="https://github.com/rootonchair/nunchaku_lite/actions/workflows/wheels.yml">
+    <img src="https://github.com/rootonchair/nunchaku_lite/actions/workflows/wheels.yml/badge.svg" alt="Release Wheels">
+  </a>
   <a href="https://nunchaku-lite.readthedocs.io/en/latest/">
     <img src="https://img.shields.io/badge/docs-readthedocs.io-blue" alt="Documentation">
   </a>
@@ -216,6 +219,7 @@ org-or-user/repo-name/path/to/checkpoint.safetensors
 | Public API and runtime LoRA usage | [docs/api.md](docs/api.md) |
 | Development, testing, and adapter authoring | [docs/development.md](docs/development.md) |
 | Documentation deployment flow | [docs/deployment.md](docs/deployment.md) |
+| Release wheel build flow | [docs/release_wheels.md](docs/release_wheels.md) |
 | Supported models and feature backlog | [docs/roadmap.md](docs/roadmap.md) |
 | Benchmarks | [benchmarks/README.md](benchmarks/README.md) |
 

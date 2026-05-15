@@ -2,7 +2,6 @@ import os
 import re
 import subprocess
 import sys
-from datetime import date
 
 import setuptools
 import torch
@@ -63,17 +62,23 @@ def get_sm_targets() -> list[str]:
     return targets
 
 
+def get_base_version(root_dir: str) -> str:
+    version_locals: dict[str, str] = {}
+    version_path = os.path.join(root_dir, "src", "nunchaku_lite", "__version__.py")
+    with open(version_path, encoding="utf-8") as version_file:
+        exec(version_file.read(), version_locals)
+    return version_locals["__version__"]
+
+
 if __name__ == "__main__":
-    version = "0.1.0"
-    if "dev" in version:
-        version += date.today().strftime("%Y%m%d")
+    root_dir = os.path.dirname(__file__)
+    version = get_base_version(root_dir)
 
     torch_version = torch.__version__.split("+")[0]
     torch_major_minor_version = ".".join(torch_version.split(".")[:2])
     cuda_version = torch.version.cuda
     version = f"{version}+cu{cuda_version}torch{torch_major_minor_version}"
 
-    root_dir = os.path.dirname(__file__)
     native_root = os.path.abspath(os.path.join(root_dir, "native"))
     if not os.path.exists(os.path.join(native_root, "src")):
         raise RuntimeError(f"Expected vendored native sources at: {native_root}")
@@ -173,6 +178,7 @@ if __name__ == "__main__":
             "safetensors",
             "huggingface-hub>=0.34",
             "packaging>=23",
+            "peft",
             "transformers>=4.41.2",
             "accelerate>=0.31",
         ],
