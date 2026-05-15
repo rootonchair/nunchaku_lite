@@ -5,7 +5,6 @@ from typing import Any
 import torch
 import torch.nn as nn
 from diffusers.models.activations import GELU
-from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.models.normalization import AdaLayerNormZero, AdaLayerNormZeroSingle
 from diffusers.models.transformers.transformer_flux import (
     FluxAttention,
