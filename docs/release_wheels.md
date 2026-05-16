@@ -81,6 +81,7 @@ export NUNCHAKU_NVCC_THREADS=2
 export NUNCHAKU_TORCH_CUDA_TAG=cu130
 export NUNCHAKU_TORCH_VERSION=2.11.0
 export MAX_JOBS=2
+export PIP_NO_CACHE_DIR=1
 export CIBW_BUILD=cp313-manylinux_x86_64
 
 python -m cibuildwheel --platform linux --output-dir wheelhouse

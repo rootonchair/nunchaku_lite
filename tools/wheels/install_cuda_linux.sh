@@ -48,5 +48,12 @@ fi
   "libcusolver-devel-${cuda_package_version}" \
   "libcusparse-devel-${cuda_package_version}"
 
+"${package_manager[@]}" clean all
+rm -rf /var/cache/dnf /var/cache/yum
+cuda_lib_dir="/usr/local/cuda-${cuda_version}/targets/x86_64-linux/lib"
+if [[ -d "${cuda_lib_dir}" ]]; then
+  find "${cuda_lib_dir}" -name "*.a" -type f -delete
+fi
+
 "/opt/rh/gcc-toolset-13/root/usr/bin/g++" --version
 "/usr/local/cuda-${cuda_version}/bin/nvcc" --version

@@ -149,6 +149,7 @@ jobs:
             NUNCHAKU_TORCH_CUDA_TAG=${{ matrix.torch_cuda.cuda_tag }}
             NUNCHAKU_TORCH_VERSION=${{ matrix.torch_cuda.torch_version }}
             MAX_JOBS=2
+            PIP_NO_CACHE_DIR=1
             PATH=/usr/local/cuda-${{ matrix.torch_cuda.cuda_version }}/bin:$PATH
         run: python -m cibuildwheel --output-dir wheelhouse
 
