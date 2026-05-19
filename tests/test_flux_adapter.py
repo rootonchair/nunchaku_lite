@@ -45,6 +45,19 @@ def test_convert_flux_state_dict_maps_original_nunchaku_keys():
     assert "single_transformer_blocks.0.attn.to_out.proj_up" in converted
 
 
+def test_convert_flux_state_dict_leaves_corrected_keys_unchanged():
+    state = {
+        "transformer_blocks.0.attn.to_qkv.qweight": torch.empty(1),
+        "transformer_blocks.0.ff_context.net.0.proj.smooth_factor": torch.empty(1),
+        "single_transformer_blocks.0.attn.to_out.proj_up": torch.empty(1),
+    }
+
+    converted = convert_flux_state_dict(state)
+
+    assert converted is state
+    assert set(converted) == set(state)
+
+
 def test_patch_transformer_patches_flux_from_synthetic_checkpoint(tmp_path):
     rank = 4
     source = make_tiny_flux_transformer()

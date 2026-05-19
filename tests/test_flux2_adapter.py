@@ -6,7 +6,12 @@ from safetensors.torch import save_file
 
 from diffusers import Flux2Transformer2DModel
 from nunchaku_lite import patch_transformer
-from nunchaku_lite.adapters.flux2 import Flux2Adapter, NunchakuFlux2Attention, _pack_flux2_rotary_emb
+from nunchaku_lite.adapters.flux2 import (
+    Flux2Adapter,
+    NunchakuFlux2Attention,
+    _pack_flux2_rotary_emb,
+    convert_flux2_state_dict,
+)
 
 
 def make_tiny_flux2_transformer():
@@ -36,6 +41,39 @@ def test_pack_flux2_rotary_emb_uses_packed_nunchaku_layout():
 
     assert packed.shape == (1, 256, 32)
     assert packed.dtype == torch.float32
+
+
+def test_convert_flux2_state_dict_maps_original_nunchaku_keys():
+    state = {
+        "transformer_blocks.0.qkv_proj.lora_down": torch.empty(1),
+        "transformer_blocks.0.qkv_proj_context.smooth_orig": torch.empty(1),
+        "transformer_blocks.0.out_proj_context.smooth": torch.empty(1),
+        "transformer_blocks.0.mlp_context_fc1.lora_up": torch.empty(1),
+        "single_transformer_blocks.0.qkv_proj.lora_down": torch.empty(1),
+        "single_transformer_blocks.0.mlp_fc2.smooth": torch.empty(1),
+    }
+
+    converted = convert_flux2_state_dict(state)
+
+    assert "transformer_blocks.0.attn.to_qkv.proj_down" in converted
+    assert "transformer_blocks.0.attn.to_added_qkv.smooth_factor_orig" in converted
+    assert "transformer_blocks.0.attn.to_add_out.smooth_factor" in converted
+    assert "transformer_blocks.0.ff_context.linear_in.proj_up" in converted
+    assert "single_transformer_blocks.0.attn.qkv_proj.proj_down" in converted
+    assert "single_transformer_blocks.0.attn.mlp_fc2.smooth_factor" in converted
+
+
+def test_convert_flux2_state_dict_leaves_corrected_keys_unchanged():
+    state = {
+        "transformer_blocks.0.attn.to_qkv.proj_down": torch.empty(1),
+        "transformer_blocks.0.ff_context.linear_in.smooth_factor": torch.empty(1),
+        "single_transformer_blocks.0.attn.qkv_proj.proj_down": torch.empty(1),
+    }
+
+    converted = convert_flux2_state_dict(state)
+
+    assert converted is state
+    assert set(converted) == set(state)
 
 
 def test_patch_transformer_patches_flux2_from_synthetic_checkpoint(tmp_path):

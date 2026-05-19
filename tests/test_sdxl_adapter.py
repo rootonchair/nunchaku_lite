@@ -48,6 +48,19 @@ def test_convert_sdxl_state_dict_maps_original_nunchaku_keys():
     assert "conv_in.weight" in converted
 
 
+def test_convert_sdxl_state_dict_leaves_corrected_keys_unchanged():
+    state = {
+        "down_blocks.0.attentions.0.transformer_blocks.0.attn1.to_qkv.proj_down": torch.empty(1),
+        "mid_block.attentions.0.transformer_blocks.0.attn2.to_q.smooth_factor_orig": torch.empty(1),
+        "conv_in.weight": torch.empty(1),
+    }
+
+    converted = convert_sdxl_state_dict(state)
+
+    assert converted is state
+    assert set(converted) == set(state)
+
+
 def test_patch_transformer_patches_sdxl_from_synthetic_checkpoint(tmp_path):
     rank = 4
     source = make_tiny_sdxl_unet()
