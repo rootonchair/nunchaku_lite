@@ -134,16 +134,18 @@ def test_import_does_not_import_full_nunchaku():
     assert "nunchaku" not in sys.modules
     assert "flux" in nunchaku_lite.list_adapters()
     assert "flux2" in nunchaku_lite.list_adapters()
+    assert "manifest" in nunchaku_lite.list_adapters()
     assert "qwen_image" in nunchaku_lite.list_adapters()
     assert "sdxl" in nunchaku_lite.list_adapters()
     assert "z_image" in nunchaku_lite.list_adapters()
 
 
-def test_unsupported_transformer_error_lists_adapters():
+def test_unsupported_transformer_error_lists_adapters(tmp_path):
     from nunchaku_lite import patch_transformer
 
-    with pytest.raises(ValueError, match="Available adapters: flux, flux2, qwen_image, sdxl, z_image"):
-        patch_transformer(torch.nn.Linear(1, 1), "missing/repo/checkpoint.safetensors")
+    checkpoint = _fake_checkpoint(tmp_path)
+    with pytest.raises(ValueError, match="Available adapters: flux, flux2, manifest, qwen_image, sdxl, z_image"):
+        patch_transformer(torch.nn.Linear(1, 1), checkpoint)
 
 
 def test_load_nunchaku_pipeline_injects_meta_loaded_transformer(tmp_path, monkeypatch):

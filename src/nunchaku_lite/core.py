@@ -11,6 +11,7 @@ from typing import Any, Protocol
 
 import torch
 
+from .manifest import RuntimeManifest, parse_runtime_manifest
 from .utils import get_precision, load_state_dict_in_safetensors
 
 
@@ -273,10 +274,11 @@ def _patch_component(
             return transformer
         raise ValueError(f"Transformer is already patched as {existing_target!r}; requested {target!r}.")
 
-    adapter = _select_adapter(transformer, target)
     state_dict, metadata = load_state_dict_in_safetensors(checkpoint, return_metadata=True)
     quantization_config = _parse_json_metadata(metadata, "quantization_config")
-    normalized_precision = _normalize_precision(precision, device, checkpoint)
+    runtime_manifest = parse_runtime_manifest(quantization_config)
+    adapter = _select_adapter_for_checkpoint(transformer, target, runtime_manifest)
+    normalized_precision = _normalize_precision(precision, device, checkpoint, runtime_manifest)
     _validate_quantization_compatibility(quantization_config, normalized_precision, device, checkpoint)
     options = PatchOptions(
         precision=normalized_precision,
@@ -301,6 +303,7 @@ def _patch_component(
     transformer._nunchaku_lite_target = adapter.target
     transformer._nunchaku_lite_adapter = adapter
     transformer._nunchaku_lite_quantization_config = quantization_config
+    transformer._nunchaku_lite_runtime_manifest = runtime_manifest
     transformer._nunchaku_lite_incompatible_keys = incompatible
     return transformer
 
@@ -499,7 +502,12 @@ def _parse_json_metadata(metadata: dict[str, str] | None, key: str) -> dict[str,
     return parsed
 
 
-def _normalize_precision(precision: str, device: str | torch.device | None, checkpoint: str | Path) -> str:
+def _normalize_precision(
+    precision: str,
+    device: str | torch.device | None,
+    checkpoint: str | Path,
+    runtime_manifest: RuntimeManifest | None = None,
+) -> str:
     """Resolve public precision options to native kernel precision names.
 
     Args:
@@ -511,7 +519,10 @@ def _normalize_precision(precision: str, device: str | torch.device | None, chec
         ``"int4"`` or native ``"nvfp4"``.
     """
 
-    selected = get_precision(precision=precision, device=device or "cuda", pretrained_model_name_or_path=checkpoint)
+    if precision == "auto" and runtime_manifest is not None and runtime_manifest.precision is not None:
+        selected = runtime_manifest.precision
+    else:
+        selected = get_precision(precision=precision, device=device or "cuda", pretrained_model_name_or_path=checkpoint)
     if selected == "fp4":
         return "nvfp4"
     return selected
@@ -559,6 +570,16 @@ def _validate_quantization_compatibility(
 
 
 def _precision_from_quantization_config(quantization_config: dict[str, Any]) -> str | None:
+    runtime_manifest = quantization_config.get("runtime_manifest")
+    if isinstance(runtime_manifest, dict):
+        requirements = runtime_manifest.get("requirements")
+        if isinstance(requirements, dict):
+            precision = requirements.get("precision")
+            if precision == "int4":
+                return "int4"
+            if precision == "fp4":
+                return "nvfp4"
+
     weight_config = quantization_config.get("weight")
     if not isinstance(weight_config, dict):
         return None
@@ -568,6 +589,22 @@ def _precision_from_quantization_config(quantization_config: dict[str, Any]) -> 
     if weight_dtype == "fp4_e2m1_all":
         return "nvfp4"
     return None
+
+
+def _select_adapter_for_checkpoint(
+    transformer: torch.nn.Module,
+    target: str,
+    runtime_manifest: RuntimeManifest | None,
+) -> TransformerAdapter:
+    if target == "manifest":
+        if runtime_manifest is None:
+            raise ValueError("target='manifest' requires quantization_config.runtime_manifest metadata.")
+        return _ADAPTERS["manifest"]
+
+    if target == "auto" and runtime_manifest is not None:
+        return _ADAPTERS["manifest"]
+
+    return _select_adapter(transformer, target)
 
 
 def _select_adapter(transformer: torch.nn.Module, target: str) -> TransformerAdapter:
@@ -621,6 +658,7 @@ def _ensure_builtin_adapters() -> None:
         return
     importlib.import_module("nunchaku_lite.adapters.flux")
     importlib.import_module("nunchaku_lite.adapters.flux2")
+    importlib.import_module("nunchaku_lite.adapters.manifest")
     importlib.import_module("nunchaku_lite.adapters.qwen_image")
     importlib.import_module("nunchaku_lite.adapters.sdxl")
     importlib.import_module("nunchaku_lite.adapters.z_image")
