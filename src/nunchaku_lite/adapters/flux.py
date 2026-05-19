@@ -800,7 +800,8 @@ class FluxAdapter:
         transformer.pos_embed = NunchakuFluxPosEmbed(dim=transformer.inner_dim, theta=10000, axes_dim=axes_dim)
         self._patch_transformer(transformer, context)
 
-        checkpoint_state = convert_flux_state_dict(checkpoint_state)
+        if _flux_state_dict_needs_conversion(checkpoint_state):
+            checkpoint_state = convert_flux_state_dict(checkpoint_state)
         finalize_svdq_checkpoint(transformer, checkpoint_state, context)
         transformer._nunchaku_lite_flux_patched = True
         from ..lora.core.runtime import bind_transformer_lora_methods
@@ -860,6 +861,9 @@ def convert_flux_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, to
         rewritten to match the lite module tree.
     """
 
+    if not _flux_state_dict_needs_conversion(state_dict):
+        return state_dict
+
     new_state_dict = {}
     for key, value in state_dict.items():
         new_key = key
@@ -903,6 +907,44 @@ def convert_flux_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, to
             new_key = new_key.replace(".smooth", ".smooth_factor")
         new_state_dict[new_key] = value
     return new_state_dict
+
+
+def _flux_state_dict_needs_conversion(state_dict: dict[str, torch.Tensor]) -> bool:
+    return any(_is_uncorrected_flux_key(key) for key in state_dict)
+
+
+def _is_uncorrected_flux_key(key: str) -> bool:
+    double_block_key = "transformer_blocks." in key
+    single_block_key = "single_transformer_blocks." in key
+    if not double_block_key and not single_block_key:
+        return False
+
+    if key.endswith((".lora_down", ".lora_up", ".smooth", ".smooth_orig")):
+        return True
+
+    if single_block_key and ".attn." not in key:
+        return any(marker in key for marker in (".qkv_proj.", ".out_proj.", ".norm_q.", ".norm_k."))
+
+    if double_block_key and not any(marker in key for marker in (".attn.", ".ff.", ".ff_context.")):
+        return any(
+            marker in key
+            for marker in (
+                ".mlp_context_fc1.",
+                ".mlp_context_fc2.",
+                ".mlp_fc1.",
+                ".mlp_fc2.",
+                ".qkv_proj_context.",
+                ".qkv_proj.",
+                ".norm_q.",
+                ".norm_k.",
+                ".norm_added_q.",
+                ".norm_added_k.",
+                ".out_proj.",
+                ".out_proj_context.",
+            )
+        )
+
+    return False
 
 
 register_adapter(FluxAdapter())

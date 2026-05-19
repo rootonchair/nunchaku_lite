@@ -30,6 +30,9 @@ from nunchaku_lite.core import PatchOptions, register_adapter
 def convert_sdxl_state_dict(state_dict: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     """Convert original nunchaku SDXL checkpoint keys to lite module names."""
 
+    if not _sdxl_state_dict_needs_conversion(state_dict):
+        return state_dict
+
     converted: dict[str, torch.Tensor] = {}
     for key, value in state_dict.items():
         new_key = key
@@ -44,6 +47,13 @@ def convert_sdxl_state_dict(state_dict: Mapping[str, torch.Tensor]) -> dict[str,
                 new_key = key.replace(".smooth", ".smooth_factor")
         converted[new_key] = value
     return converted
+
+
+def _sdxl_state_dict_needs_conversion(state_dict: Mapping[str, torch.Tensor]) -> bool:
+    return any(
+        ".transformer_blocks." in key and key.endswith((".lora_down", ".lora_up", ".smooth", ".smooth_orig"))
+        for key in state_dict
+    )
 
 
 class NunchakuSDXLAttention(nn.Module):
@@ -177,7 +187,7 @@ class SDXLAdapter:
         context = build_svdq_context(transformer, dict(metadata), options)
         prepare_transformer_dtype(transformer, context)
         self._patch_unet(transformer, context)
-        converted = convert_sdxl_state_dict(state_dict)
+        converted = convert_sdxl_state_dict(state_dict) if _sdxl_state_dict_needs_conversion(state_dict) else state_dict
         finalize_svdq_checkpoint(transformer, converted, context)
         transformer._nunchaku_lite_sdxl_patched = True
         return converted
