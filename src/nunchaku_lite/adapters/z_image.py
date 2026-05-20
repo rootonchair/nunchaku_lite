@@ -19,8 +19,10 @@ from .common import (
     finalize_svdq_checkpoint,
     pack_rotemb,
     pad_tensor,
+    patch_attention_module,
     patch_modules_recursively,
     prepare_transformer_dtype,
+    svdq_from_linear,
 )
 
 
@@ -222,11 +224,16 @@ class ZImageAdapter:
 
         patch_modules_recursively(
             transformer,
-            context,
-            attention_processor_factory=lambda _path, _attention: ZImageSingleStreamAttnProcessor(),
-            linear_filter=lambda path, _linear: self._should_patch_linear(path, skip_refiners),
-            skip_subtree=lambda path, module: self._should_skip_subtree(path, module, skip_refiners),
-            module_converters={DiffusersZImageFeedForward: _convert_z_image_ff},
+            skips=lambda path, module: self._should_skip(path, module, skip_refiners),
+            module_converters={
+                Attention: lambda attention: patch_attention_module(
+                    attention,
+                    ZImageSingleStreamAttnProcessor(),
+                    context=context,
+                ),
+                DiffusersZImageFeedForward: _convert_z_image_ff,
+                nn.Linear: lambda linear: svdq_from_linear(linear, context),
+            },
         )
 
     def _patch_adaln_lora_linears(self, transformer: torch.nn.Module, skip_refiners: bool) -> None:
@@ -277,22 +284,22 @@ class ZImageAdapter:
             return False
         return path.startswith(("noise_refiner.", "context_refiner."))
 
-    def _should_skip_subtree(self, path: str, module: nn.Module, skip_refiners: bool) -> bool:
-        """Return whether a child subtree should be excluded from traversal.
+    def _should_skip(self, path: str, module: nn.Module, skip_refiners: bool) -> bool:
+        """Return whether a child module should be excluded from traversal.
 
         Args:
             path: Dot-separated module path produced by the recursive
                 traversal.
             module: Child module currently being considered by
                 :func:`patch_modules_recursively`.
-            skip_refiners: Whether refiner attention should remain dense.
+            skip_refiners: Whether refiner attention and linears should remain dense.
 
         Returns:
-            ``True`` for refiner attention modules when refiners are skipped;
-            otherwise ``False`` so feed-forward conversion and active attention
-            patching can proceed.
+            ``True`` for modules outside the active Z-Image patch scope.
         """
 
+        if isinstance(module, nn.Linear) and not self._should_patch_linear(path, skip_refiners):
+            return True
         if not skip_refiners or module.__class__ is not Attention:
             return False
         return path.startswith(("noise_refiner.", "context_refiner."))

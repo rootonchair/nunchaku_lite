@@ -2,7 +2,7 @@
 
 import math
 from dataclasses import dataclass
-from typing import Callable, Type
+from typing import Callable
 
 import torch
 import torch.nn as nn
@@ -10,6 +10,17 @@ from diffusers.models.attention_processor import Attention
 
 from ..linear import SVDQW4A4Linear
 from ..utils import convert_fp16, patch_scale_key
+
+PATCHED_MODULE_ATTR = "_nunchaku_lite_patched_module"
+
+
+def _mark_patched_module(module: nn.Module) -> nn.Module:
+    setattr(module, PATCHED_MODULE_ATTR, True)
+    return module
+
+
+def _is_patched_module(module: nn.Module) -> bool:
+    return bool(getattr(module, PATCHED_MODULE_ATTR, False))
 
 
 @dataclass(frozen=True)
@@ -47,10 +58,6 @@ class ModulePatchReport:
     """Counts of module replacements performed by a recursive patch pass.
 
     Attributes:
-        attention_modules: Number of generic Diffusers attention children
-            replaced with :class:`NunchakuAttention`.
-        linear_modules: Number of dense ``nn.Linear`` children replaced with
-            :class:`SVDQW4A4Linear`.
         converted_modules: Number of adapter-specific child modules normalized
             or replaced by a caller-provided converter before recursive
             patching.
@@ -60,8 +67,6 @@ class ModulePatchReport:
             rewrite.
     """
 
-    attention_modules: int = 0
-    linear_modules: int = 0
     converted_modules: int = 0
     skipped_modules: int = 0
 
@@ -75,8 +80,6 @@ class ModulePatchReport:
             None. The current report is updated in place.
         """
 
-        self.attention_modules += other.attention_modules
-        self.linear_modules += other.linear_modules
         self.converted_modules += other.converted_modules
         self.skipped_modules += other.skipped_modules
 
@@ -175,7 +178,7 @@ def svdq_from_linear(
         SVDQ linear module ready for checkpoint loading.
     """
 
-    return SVDQW4A4Linear.from_linear(linear, **_linear_kwargs(context, kwargs))
+    return _mark_patched_module(SVDQW4A4Linear.from_linear(linear, **_linear_kwargs(context, kwargs)))
 
 
 class NunchakuAttention(nn.Module):
@@ -241,6 +244,7 @@ class NunchakuAttention(nn.Module):
 
         self.processor = processor
         self._nunchaku_lite_attention_patched = True
+        _mark_patched_module(self)
 
     def _copy_attention_attributes(self, attention: nn.Module) -> None:
         """Copy non-module metadata from a Diffusers attention module.
@@ -322,7 +326,7 @@ def patch_attention_module(
     """
 
     if isinstance(attention, NunchakuAttention):
-        return attention
+        return _mark_patched_module(attention)
     if attention.__class__ is not Attention:
         raise TypeError(
             "patch_attention_module only supports the exact diffusers Attention class; "
@@ -340,60 +344,33 @@ def patch_attention_module(
 
 def patch_modules_recursively(
     module: nn.Module,
-    context: SVDQPatchContext | None = None,
     *,
     path: str = "",
-    attention_processor_factory: Callable[[str, Attention], object] | None = None,
-    linear_filter: Callable[[str, nn.Linear], bool] | None = None,
-    skip_subtree: Callable[[str, nn.Module], bool] | None = None,
+    skips: Callable[[str, nn.Module], bool] | None = None,
     module_converters: dict[type[nn.Module], Callable[[nn.Module], nn.Module]] | None = None,
-    attention_kwargs: dict | None = None,
-    linear_kwargs: dict | None = None,
 ) -> ModulePatchReport:
-    """Recursively patch generic attention and eligible linear children.
+    """Recursively patch modules through explicit converters.
 
     The traversal mutates ``module`` in place by walking its direct children,
-    then descending into unhandled child modules. Exact Diffusers
-    :class:`Attention` children are replaced through
-    :func:`patch_attention_module` when ``attention_processor_factory`` is
-    provided. Dense ``nn.Linear`` children are replaced with
-    :class:`SVDQW4A4Linear` when ``linear_filter`` allows the child. Adapter
-    code should call this helper on safe roots or provide filters because a
-    whole transformer often contains dense projections that are intentionally
-    not present in a quantized checkpoint. Adapter-specific child modules can
-    also be normalized first through ``module_converters`` so the rest of the
-    traversal only needs to handle generic attention and linear replacement.
+    then descending into unhandled child modules. Adapter code should state
+    every replacement explicitly through ``module_converters`` and use
+    ``skips`` to keep out-of-scope subtrees or leaf modules dense.
 
     Args:
         module: Root module whose children should be inspected and mutated.
             The root itself is not replaced; pass its parent when the root may
             be an attention or linear module.
-        context: Optional SVDQ patch context used to configure replacement
-            linear modules.
         path: Dot-separated path prefix for ``module``. Recursive calls append
             child names to this value before invoking filters and factories.
-        attention_processor_factory: Optional callable receiving
-            ``(child_path, attention)`` and returning the processor to install
-            on a generic :class:`Attention` replacement. When omitted, generic
-            attention children are skipped rather than partially patched.
-        linear_filter: Optional callable receiving ``(child_path, linear)``.
-            Returning ``False`` skips that dense linear without descending into
-            it. When omitted, all dense linear children in the selected root are
-            patched.
-        skip_subtree: Optional callable receiving ``(child_path, child)``.
-            Returning ``True`` skips the child and all of its descendants.
+        skips: Optional callable receiving ``(child_path, child)``. Returning
+            ``True`` skips the child and all of its descendants. It can be used
+            for both whole subtrees and leaf linears.
         module_converters: Optional dictionary keyed by exact module class.
             When a child has a matching ``child.__class__`` entry, the
             converter is called with the child and its return value replaces
-            the child before attention, linear, or recursive handling
-            continues. Converters are intended for adapter-specific layout
-            normalization, such as turning a model-specific feed-forward block
-            into a generic Diffusers ``FeedForward`` or replacing a model-
-            specific Diffusers ``Attention`` subclass with a lite module.
-        attention_kwargs: Additional keyword arguments forwarded to
-            :func:`patch_attention_module`.
-        linear_kwargs: Additional keyword arguments forwarded to
-            :func:`svdq_from_linear`.
+            the child before recursive handling continues. Converters are
+            intended for all replacement decisions, including dense
+            ``nn.Linear`` replacement through :func:`svdq_from_linear`.
 
     Returns:
         :class:`ModulePatchReport` containing replacement and skip counts for
@@ -402,124 +379,34 @@ def patch_modules_recursively(
 
     report = ModulePatchReport()
     module_converters = module_converters or {}
-    attention_kwargs = attention_kwargs or {}
-    linear_kwargs = linear_kwargs or {}
 
     for name, child in list(module.named_children()):
         child_path = f"{path}.{name}" if path else name
 
-        if skip_subtree is not None and skip_subtree(child_path, child):
+        if skips is not None and skips(child_path, child):
             report.skipped_modules += 1
             continue
 
-        if isinstance(child, (NunchakuAttention, SVDQW4A4Linear)):
+        if _is_patched_module(child):
             report.skipped_modules += 1
             continue
 
         module_converter = module_converters.get(child.__class__)
         if module_converter is not None:
-            child = module_converter(child)
+            child = _mark_patched_module(module_converter(child))
             setattr(module, name, child)
             report.converted_modules += 1
-
-        if child.__class__ is Attention:
-            if attention_processor_factory is None:
-                report.skipped_modules += 1
-                continue
-            setattr(
-                module,
-                name,
-                patch_attention_module(
-                    child,
-                    attention_processor_factory(child_path, child),
-                    context=context,
-                    **attention_kwargs,
-                ),
-            )
-            report.attention_modules += 1
-            continue
-
-        if isinstance(child, Attention):
-            raise TypeError(
-                "patch_modules_recursively encountered an unsupported Diffusers Attention subclass without a converter: "
-                f"{child.__class__.__module__}.{child.__class__.__name__} at {child_path}"
-            )
-
-        if isinstance(child, nn.Linear):
-            if linear_filter is not None and not linear_filter(child_path, child):
-                report.skipped_modules += 1
-                continue
-            _replace_linear_child(module, name, lambda linear: svdq_from_linear(linear, context, **linear_kwargs))
-            report.linear_modules += 1
-            continue
 
         report.add(
             patch_modules_recursively(
                 child,
-                context,
                 path=child_path,
-                attention_processor_factory=attention_processor_factory,
-                linear_filter=linear_filter,
-                skip_subtree=skip_subtree,
+                skips=skips,
                 module_converters=module_converters,
-                attention_kwargs=attention_kwargs,
-                linear_kwargs=linear_kwargs,
             )
         )
 
     return report
-
-
-def _replace_linear_child(
-    module: nn.Module,
-    name: str,
-    replacement_factory: Callable[[nn.Linear], nn.Module],
-) -> None:
-    """Replace one named linear child with a factory-created module.
-
-    This small helper centralizes the ``get child, verify type, setattr``
-    mechanics shared by the mixed module-tree patcher and the linear-only
-    patcher. Callers remain responsible for deciding whether the child is in
-    scope and for providing the replacement factory appropriate to that path.
-
-    Args:
-        module: Parent module that owns the linear child.
-        name: Child attribute name in ``module``.
-        replacement_factory: Callable receiving the existing ``nn.Linear`` and
-            returning the replacement module to install.
-
-    Returns:
-        None. The parent module is mutated in place.
-
-    Raises:
-        TypeError: If the named child is not an ``nn.Linear``. This indicates a
-            caller bug because filtering should happen before replacement.
-    """
-
-    child = getattr(module, name)
-    if not isinstance(child, nn.Linear):
-        raise TypeError(f"Expected {name} to be an nn.Linear child, got {child.__class__.__name__}")
-    setattr(module, name, replacement_factory(child))
-
-
-def patch_svdq_linears(
-    module: nn.Module,
-    context: SVDQPatchContext | None = None,
-    **kwargs,
-) -> nn.Module:
-    """Recursively replace every ``nn.Linear`` child with ``SVDQW4A4Linear``.
-
-    Args:
-        module: Module tree to mutate in place.
-        context: Optional SVDQ settings applied to every replacement.
-        **kwargs: Additional constructor overrides for replacement modules.
-
-    Returns:
-        The same ``module`` object after mutation.
-    """
-
-    return patch_linear(module, SVDQW4A4Linear, **_linear_kwargs(context, kwargs))
-
 
 def fuse_linears(linears: list[nn.Linear]) -> nn.Linear:
     """Create a placeholder linear for concatenated output projections.
@@ -551,26 +438,6 @@ def fuse_linears(linears: list[nn.Linear]) -> nn.Linear:
         dtype=linears[0].weight.dtype,
         device=linears[0].weight.device,
     )
-
-
-def patch_linear(module: nn.Module, linear_cls: Type[nn.Module], **kwargs) -> nn.Module:
-    """Recursively replace child ``nn.Linear`` modules.
-
-    Args:
-        module: Module tree to mutate in place.
-        linear_cls: Replacement class exposing ``from_linear``.
-        **kwargs: Constructor arguments forwarded to ``from_linear``.
-
-    Returns:
-        The same ``module`` object after mutation.
-    """
-
-    for name, child in list(module.named_children()):
-        if isinstance(child, nn.Linear):
-            _replace_linear_child(module, name, lambda linear: linear_cls.from_linear(linear, **kwargs))
-        else:
-            patch_linear(child, linear_cls, **kwargs)
-    return module
 
 
 def pack_rotemb(rotemb: torch.Tensor) -> torch.Tensor:

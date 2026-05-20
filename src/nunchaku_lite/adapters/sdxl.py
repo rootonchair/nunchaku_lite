@@ -20,7 +20,7 @@ from nunchaku_lite.adapters.common import (
     build_svdq_context,
     finalize_svdq_checkpoint,
     fuse_linears,
-    patch_svdq_linears,
+    patch_modules_recursively,
     prepare_transformer_dtype,
     svdq_from_linear,
 )
@@ -217,7 +217,10 @@ class SDXLAdapter:
         if getattr(block, "attn2", None) is not None:
             block.attn2 = NunchakuSDXLAttention(block.attn2, context)
         if getattr(block, "ff", None) is not None:
-            patch_svdq_linears(block.ff, context)
+            patch_modules_recursively(
+                block.ff,
+                module_converters={nn.Linear: lambda linear: svdq_from_linear(linear, context)},
+            )
 
 
 register_adapter(SDXLAdapter())

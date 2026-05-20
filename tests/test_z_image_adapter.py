@@ -154,12 +154,14 @@ def test_patch_modules_recursively_replaces_exact_attention_and_filtered_linears
     module = Wrapper()
     report = patch_modules_recursively(
         module,
-        attention_processor_factory=lambda _path, _attention: object(),
-        linear_filter=lambda path, _linear: path.startswith("feed_forward."),
+        module_converters={
+            Attention: lambda attention: patch_attention_module(attention, object()),
+            nn.Linear: lambda linear: SVDQW4A4Linear.from_linear(linear, precision="int4", rank=4),
+        },
+        skips=lambda path, child: isinstance(child, nn.Linear) and not path.startswith("feed_forward."),
     )
 
-    assert report.attention_modules == 1
-    assert report.linear_modules == 2
+    assert report.converted_modules == 3
     assert isinstance(module.attention, NunchakuAttention)
     assert isinstance(module.feed_forward[0], SVDQW4A4Linear)
     assert isinstance(module.feed_forward[2], SVDQW4A4Linear)
@@ -185,18 +187,20 @@ def test_patch_modules_recursively_applies_module_converters_before_descending()
     module = Wrapper()
     report = patch_modules_recursively(
         module,
-        module_converters={DiffusersZImageFeedForward: convert_z_image_ff},
-        linear_filter=lambda path, _linear: path.startswith("feed_forward."),
+        module_converters={
+            DiffusersZImageFeedForward: convert_z_image_ff,
+            nn.Linear: lambda linear: SVDQW4A4Linear.from_linear(linear, precision="int4", rank=4),
+        },
+        skips=lambda path, child: isinstance(child, nn.Linear) and not path.startswith("feed_forward."),
     )
 
-    assert report.converted_modules == 1
-    assert report.linear_modules == 2
+    assert report.converted_modules == 3
     assert isinstance(module.feed_forward, FeedForward)
     assert isinstance(module.feed_forward.net[0].proj, SVDQW4A4Linear)
     assert isinstance(module.feed_forward.net[2], SVDQW4A4Linear)
 
 
-def test_patch_modules_recursively_raises_for_unhandled_attention_subclasses():
+def test_patch_modules_recursively_descends_into_unconverted_attention_subclasses():
     class CustomAttention(Attention):
         pass
 
@@ -206,10 +210,18 @@ def test_patch_modules_recursively_raises_for_unhandled_attention_subclasses():
             self.attention = CustomAttention(query_dim=8, heads=2, dim_head=4, bias=False)
 
     module = Wrapper()
+    report = patch_modules_recursively(
+        module,
+        module_converters={nn.Linear: lambda linear: SVDQW4A4Linear.from_linear(linear, precision="int4", rank=4)},
+        skips=lambda path, child: isinstance(child, nn.Linear)
+        and not (path.endswith(".to_q") or path.endswith(".to_k")),
+    )
 
-    with pytest.raises(TypeError, match="unsupported Diffusers Attention subclass without a converter"):
-        patch_modules_recursively(module, attention_processor_factory=lambda _path, _attention: object())
+    assert report.converted_modules == 2
     assert isinstance(module.attention, CustomAttention)
+    assert isinstance(module.attention.to_q, SVDQW4A4Linear)
+    assert isinstance(module.attention.to_k, SVDQW4A4Linear)
+    assert isinstance(module.attention.to_v, nn.Linear)
 
 
 def test_patch_modules_recursively_replaces_attention_subclasses_with_converter():

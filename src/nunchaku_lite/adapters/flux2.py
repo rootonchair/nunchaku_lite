@@ -936,8 +936,7 @@ class Flux2Adapter:
 
         patch_modules_recursively(
             transformer,
-            context,
-            linear_filter=lambda _path, _linear: False,
+            skips=lambda _path, module: isinstance(module, nn.Linear),
             module_converters={
                 Flux2TransformerBlock: lambda block: NunchakuFlux2TransformerBlock(block, context=context),
                 Flux2SingleTransformerBlock: lambda block: NunchakuFlux2SingleTransformerBlock(

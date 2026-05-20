@@ -600,8 +600,7 @@ class QwenImageAdapter:
 
         patch_modules_recursively(
             transformer,
-            context,
-            linear_filter=lambda _path, _linear: False,
+            skips=lambda _path, module: isinstance(module, nn.Linear),
             module_converters={
                 QwenImageTransformerBlock: lambda block: NunchakuQwenImageTransformerBlock(
                     block, scale_shift=0, context=context
