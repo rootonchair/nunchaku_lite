@@ -54,6 +54,8 @@ current porting backlog for `nunchaku_lite`:
 - [x] Z-Image runtime LoRA support, including dense AdaLN modulation LoRA
   branches.
 - [ ] FLUX IP-Adapter integration.
+- [ ] Full inference test coverage for FLUX IP-Adapter.
+- [ ] Full inference test coverage for FLUX.2 IP-Adapter.
 - [ ] FLUX PuLID pipeline or patching support.
 - [ ] FLUX ControlNet workflow coverage for Canny, Depth, Fill, and
   ControlNet-Union variants.
@@ -61,6 +63,8 @@ current porting backlog for `nunchaku_lite`:
   double-block cache, and DiT cache examples.
 - [ ] Async/offload paths for lower-VRAM inference where supported by the
   original implementation.
+- [ ] Remove monkey-patched transformer forward overrides in favor of module
+  wrappers or inherited transformer implementations.
 
 ## Notes
 
