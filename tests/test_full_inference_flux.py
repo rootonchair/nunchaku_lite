@@ -92,36 +92,39 @@ def test_flux_dev_load_nunchaku_pipeline_runtime_lora_full_inference(tmp_path):
     )
     pipe.enable_model_cpu_offload()
 
-    prompt = "A portrait photo of a ceramic tea cup on a wooden desk beside a small fern, soft window light"
-    seed = 12345
+    prompt = (
+        "GHIBSKY style, hand-painted anime illustration of a cozy cottage in a magical forest, "
+        "warm glowing windows, lush moss, soft painterly background, whimsical atmosphere"
+    )
+    seed = 67890
 
     baseline = _generate(pipe, prompt, seed)
     baseline.save(output_dir / "flux_dev_baseline.png")
     _assert_image_has_signal(baseline, "baseline")
 
     pipe.load_lora_weights(ghibsky_repo, weight_name=ghibsky_weight, adapter_name="ghibsky")
-    pipe.set_adapters("ghibsky", adapter_weights=0.75)
-    ghibsky_strong = _generate(pipe, f"GHIBSKY style {prompt}", seed)
-    ghibsky_strong.save(output_dir / "flux_dev_ghibsky_075.png")
+    pipe.set_adapters("ghibsky", adapter_weights=1.0)
+    ghibsky_strong = _generate(pipe, prompt, seed)
+    ghibsky_strong.save(output_dir / "flux_dev_ghibsky_100.png")
     _assert_image_has_signal(ghibsky_strong, "ghibsky_strong")
 
-    pipe.set_adapters("ghibsky", adapter_weights=0.25)
-    ghibsky_weak = _generate(pipe, f"GHIBSKY style {prompt}", seed)
-    ghibsky_weak.save(output_dir / "flux_dev_ghibsky_025.png")
+    pipe.set_adapters("ghibsky", adapter_weights=0.5)
+    ghibsky_weak = _generate(pipe, prompt, seed)
+    ghibsky_weak.save(output_dir / "flux_dev_ghibsky_050.png")
     _assert_image_has_signal(ghibsky_weak, "ghibsky_weak")
     assert _mean_abs_diff(ghibsky_strong, ghibsky_weak) > 0.5
 
     pipe.load_lora_weights(realism_repo, weight_name=realism_weight, adapter_name="realism")
     pipe.set_adapters(["ghibsky", "realism"], adapter_weights=[0.55, 0.45])
-    composed = _generate(pipe, f"GHIBSKY style ultra realistic {prompt}", seed)
+    composed = _generate(pipe, f"ultra realistic {prompt}", seed)
     composed.save(output_dir / "flux_dev_ghibsky_realism.png")
     _assert_image_has_signal(composed, "composed")
     assert set(pipe.get_active_adapters()) == {"ghibsky", "realism"}
 
     pipe.delete_adapters("realism")
     assert pipe.get_list_adapters() == {"transformer": ["ghibsky"]}
-    pipe.set_adapters("ghibsky", adapter_weights=0.75)
-    after_delete = _generate(pipe, f"GHIBSKY style {prompt}", seed)
+    pipe.set_adapters("ghibsky", adapter_weights=1.0)
+    after_delete = _generate(pipe, prompt, seed)
     after_delete.save(output_dir / "flux_dev_after_delete_realism.png")
     _assert_image_has_signal(after_delete, "after_delete")
 

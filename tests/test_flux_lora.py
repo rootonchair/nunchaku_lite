@@ -97,12 +97,12 @@ def test_set_named_lora_strength_recomposes_from_baseline(tmp_path):
     }
 
     transformer.load_lora(first, strength=1.0, name="first")
-    transformer.load_lora(second, strength=0.25, name="second")
-    transformer.set_lora_strength(0.5, name="second")
+    transformer.load_lora(second, strength=0.5, name="second")
+    transformer.set_lora_strength(1.0, name="second")
 
     logical_down = unpack_lowrank_weight(module.proj_down.detach(), down=True)
     assert torch.allclose(logical_down[4:5], torch.ones_like(logical_down[4:5]))
-    assert torch.allclose(logical_down[5:6], torch.full_like(logical_down[5:6], 1.5))
+    assert torch.allclose(logical_down[5:6], torch.full_like(logical_down[5:6], 3.0))
     with pytest.raises(ValueError, match="Multiple LoRAs"):
         transformer.set_lora_strength(1.0)
 
@@ -112,7 +112,7 @@ def test_set_named_lora_strength_recomposes_from_baseline(tmp_path):
     assert transformer.get_active_adapters() == ["second"]
     logical_down = unpack_lowrank_weight(module.proj_down.detach(), down=True)
     assert module.proj_down.shape[1] == 16
-    assert torch.allclose(logical_down[4:5], torch.full_like(logical_down[4:5], 1.5))
+    assert torch.allclose(logical_down[4:5], torch.full_like(logical_down[4:5], 3.0))
     assert torch.count_nonzero(logical_down[5:]) == 0
 
 
@@ -132,12 +132,12 @@ def test_transformer_set_adapters_disable_enable_and_delete(tmp_path):
 
     transformer.load_lora(first, strength=1.0, name="first")
     transformer.load_lora(second, strength=1.0, name="second")
-    transformer.set_adapters(["second"], weights=[0.25])
+    transformer.set_adapters(["second"], weights=[0.5])
 
     logical_down = unpack_lowrank_weight(module.proj_down.detach(), down=True)
     assert transformer.get_list_adapters() == ["first", "second"]
     assert transformer.get_active_adapters() == ["second"]
-    assert torch.allclose(logical_down[4:5], torch.full_like(logical_down[4:5], 0.75))
+    assert torch.allclose(logical_down[4:5], torch.full_like(logical_down[4:5], 1.5))
     assert torch.count_nonzero(logical_down[5:]) == 0
 
     transformer.disable_lora()
@@ -147,7 +147,7 @@ def test_transformer_set_adapters_disable_enable_and_delete(tmp_path):
     transformer.enable_lora()
     assert transformer.get_active_adapters() == ["second"]
     logical_down = unpack_lowrank_weight(module.proj_down.detach(), down=True)
-    assert torch.allclose(logical_down[4:5], torch.full_like(logical_down[4:5], 0.75))
+    assert torch.allclose(logical_down[4:5], torch.full_like(logical_down[4:5], 1.5))
 
     transformer.delete_adapters("second")
     assert transformer.get_list_adapters() == ["first"]
@@ -168,13 +168,13 @@ def test_load_diffusers_adanorm_lora_sets_awq_side_branch(tmp_path):
         f"transformer.{module_name}.lora_B.weight": torch.ones(module.out_features, 2, dtype=torch.bfloat16),
     }
 
-    transformer.load_lora(lora, strength=0.25, name="norm")
+    transformer.load_lora(lora, strength=0.5, name="norm")
 
     assert module._nunchaku_lite_lora_down.shape == (module.in_features, 16)
     assert module._nunchaku_lite_lora_up.shape == (module.out_features, 16)
     assert torch.allclose(
         module._nunchaku_lite_lora_down[:, :2],
-        torch.full_like(module._nunchaku_lite_lora_down[:, :2], 0.25),
+        torch.full_like(module._nunchaku_lite_lora_down[:, :2], 0.5),
     )
     assert torch.count_nonzero(module._nunchaku_lite_lora_down[:, 2:]) == 0
     transformer.reset_lora()
