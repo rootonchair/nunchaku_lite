@@ -5,7 +5,7 @@ import torch
 from safetensors.torch import save_file
 
 from diffusers import FluxTransformer2DModel
-from diffusers.models.transformers.transformer_flux import FluxAttention, FluxIPAdapterAttnProcessor
+from diffusers.models.transformers.transformer_flux import FluxIPAdapterAttnProcessor
 from nunchaku_lite import patch_transformer
 from nunchaku_lite.adapters.flux import (
     FluxAdapter,
@@ -79,7 +79,7 @@ def test_patch_transformer_patches_flux_from_synthetic_checkpoint(tmp_path):
     assert transformer._nunchaku_lite_target == "flux"
     assert transformer.transformer_blocks[0].__class__.__name__ == "FluxTransformerBlock"
     assert transformer.single_transformer_blocks[0].__class__.__name__ == "NunchakuFluxSingleTransformerBlock"
-    assert isinstance(transformer.transformer_blocks[0].attn, FluxAttention)
+    assert isinstance(transformer.transformer_blocks[0].attn, NunchakuFluxAttention)
     assert isinstance(transformer.transformer_blocks[0].attn.to_qkv, SVDQW4A4Linear)
     assert isinstance(transformer.single_transformer_blocks[0].attn.to_out, SVDQW4A4Linear)
     assert not hasattr(transformer.single_transformer_blocks[0], "proj_out")

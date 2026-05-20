@@ -1,21 +1,20 @@
 """Flux2 adapter for patching Diffusers Flux2 transformers with Nunchaku Lite modules."""
 
+import inspect
 import math
 import types
 from typing import Any
 
 import torch
 import torch.nn as nn
+from diffusers.models.attention import AttentionModuleMixin
 from diffusers.models.attention_dispatch import dispatch_attention_fn
 from diffusers.models.embeddings import apply_rotary_emb
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.models.transformers.transformer_flux2 import (
     Flux2Attention,
     Flux2FeedForward,
-    Flux2Modulation,
     Flux2ParallelSelfAttention,
-    Flux2SingleTransformerBlock,
-    Flux2TransformerBlock,
 )
 
 from ..core import PatchOptions, register_adapter
@@ -24,7 +23,6 @@ from ..ops.fused import fused_qkv_norm_rotary
 from .common import (
     SVDQPatchContext,
     alloc_packed_qkv as _alloc_packed_qkv,
-    apply_gated_residual as _apply_gated_residual,
     build_svdq_context,
     finalize_svdq_checkpoint,
     fuse_linears,
@@ -113,78 +111,24 @@ def _flux2_kv_causal_attention(
     return torch.cat([attn_txt, attn_ref, attn_img], dim=1)
 
 
-class NunchakuFlux2Attention(nn.Module):
-    """Lite replacement for Flux2 cross-stream attention with SVDQ projections."""
+class NunchakuFlux2AttnProcessor:
+    """Flux2 attention processor using patched SVDQ projections."""
 
-    def __init__(self, other: Flux2Attention, context: SVDQPatchContext | None = None, **kwargs):
-        """Copy attention metadata and replace QKV/output projections.
-
-        Args:
-            other: Source Diffusers Flux2 attention module.
-            context: Shared SVDQ patch settings.
-            **kwargs: Additional SVDQ constructor overrides.
-
-        Returns:
-            None.
-        """
-
-        super().__init__()
-        self.head_dim = other.head_dim
-        self.inner_dim = other.inner_dim
-        self.query_dim = other.query_dim
-        self.out_dim = other.out_dim
-        self.heads = other.heads
-        self.use_bias = other.use_bias
-        self.dropout = other.dropout
-        self.added_kv_proj_dim = other.added_kv_proj_dim
-        self.added_proj_bias = other.added_proj_bias
-        processor = getattr(other, "processor", None)
+    def __init__(self, processor=None):
         self._attention_backend = getattr(processor, "_attention_backend", None)
         self._parallel_config = getattr(processor, "_parallel_config", None)
 
-        self.norm_q = other.norm_q
-        self.norm_k = other.norm_k
-        self.to_out = other.to_out
-        self.to_out[0] = svdq_from_linear(self.to_out[0], context, **kwargs)
-        with torch.device("meta"):
-            to_qkv = fuse_linears([other.to_q, other.to_k, other.to_v])
-        self.to_qkv = svdq_from_linear(to_qkv, context, **kwargs)
-
-        if self.added_kv_proj_dim is not None:
-            self.norm_added_q = other.norm_added_q
-            self.norm_added_k = other.norm_added_k
-            self.to_add_out = svdq_from_linear(other.to_add_out, context, **kwargs)
-            with torch.device("meta"):
-                to_added_qkv = fuse_linears([other.add_q_proj, other.add_k_proj, other.add_v_proj])
-            self.to_added_qkv = svdq_from_linear(to_added_qkv, context, **kwargs)
-
-    def forward(
+    def __call__(
         self,
+        attn: Flux2Attention,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor | None = None,
         attention_mask: torch.Tensor | None = None,
         image_rotary_emb: tuple[torch.Tensor, torch.Tensor] | torch.Tensor | None = None,
-        **kwargs,
+        kv_cache=None,
+        kv_cache_mode: str | None = None,
+        num_ref_tokens: int = 0,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Run Flux2 attention, choosing packed native attention when possible.
-
-        Args:
-            hidden_states: Image hidden states.
-            encoder_hidden_states: Optional text/context hidden states.
-            attention_mask: Optional attention mask.
-            image_rotary_emb: Either Diffusers rotary tuple/tensor or packed
-                rotary tensors, depending on the forward path.
-            **kwargs: Optional KV-cache and reference-token controls.
-
-        Returns:
-            Hidden-state output for single-stream attention, or
-            ``(hidden_states, encoder_hidden_states)`` for double-stream
-            attention.
-        """
-
-        kv_cache = kwargs.get("kv_cache", None)
-        kv_cache_mode = kwargs.get("kv_cache_mode", None)
-        num_ref_tokens = int(kwargs.get("num_ref_tokens", 0))
         use_packed_fp16 = (
             kv_cache_mode is None
             and encoder_hidden_states is not None
@@ -195,9 +139,11 @@ class NunchakuFlux2Attention(nn.Module):
             and hidden_states.is_cuda
         )
         if use_packed_fp16:
-            return self._forward_packed(hidden_states, encoder_hidden_states, image_rotary_emb)
+            return self._forward_packed(attn, hidden_states, encoder_hidden_states, image_rotary_emb)
 
-        query, key, value, encoder_seq_len = self._project_qkv(hidden_states, encoder_hidden_states, image_rotary_emb)
+        query, key, value, encoder_seq_len = self._project_qkv(
+            attn, hidden_states, encoder_hidden_states, image_rotary_emb
+        )
 
         if kv_cache_mode == "extract" and kv_cache is not None and num_ref_tokens > 0:
             ref_start = encoder_seq_len
@@ -227,31 +173,20 @@ class NunchakuFlux2Attention(nn.Module):
             encoder_hidden_states, hidden_states = hidden_states.split_with_sizes(
                 [encoder_seq_len, hidden_states.shape[1] - encoder_seq_len], dim=1
             )
-            encoder_hidden_states = self.to_add_out(encoder_hidden_states)
-        hidden_states = self.to_out[0](hidden_states)
-        hidden_states = self.to_out[1](hidden_states)
+            encoder_hidden_states = attn.to_add_out(encoder_hidden_states)
+        hidden_states = attn.to_out[0](hidden_states)
+        hidden_states = attn.to_out[1](hidden_states)
         if encoder_seq_len:
             return hidden_states, encoder_hidden_states
         return hidden_states
 
     def _forward_packed(
         self,
+        attn: Flux2Attention,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
         image_rotary_emb: tuple[torch.Tensor, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run padded native fp16 attention for separate image and text streams.
-
-        Args:
-            hidden_states: Image hidden states.
-            encoder_hidden_states: Text/context hidden states.
-            image_rotary_emb: Packed ``(image_rope, text_rope)`` tuple.
-
-        Returns:
-            Tuple ``(hidden_states, encoder_hidden_states)`` after attention and
-            output projections.
-        """
-
         batch_size = hidden_states.shape[0]
         num_txt_tokens = encoder_hidden_states.shape[1]
         num_img_tokens = hidden_states.shape[1]
@@ -259,24 +194,24 @@ class NunchakuFlux2Attention(nn.Module):
         num_img_tokens_pad = math.ceil(num_img_tokens / 256) * 256
         num_tokens_pad = num_txt_tokens_pad + num_img_tokens_pad
         query = torch.empty(
-            batch_size, self.heads, num_tokens_pad, self.head_dim, dtype=torch.float16, device=hidden_states.device
+            batch_size, attn.heads, num_tokens_pad, attn.head_dim, dtype=torch.float16, device=hidden_states.device
         )
         key = torch.empty_like(query)
         value = torch.empty_like(query)
         fused_qkv_norm_rotary(
             hidden_states,
-            self.to_qkv,
-            self.norm_q,
-            self.norm_k,
+            attn.to_qkv,
+            attn.norm_q,
+            attn.norm_k,
             image_rotary_emb[0],
             output=(query[:, :, num_txt_tokens_pad:], key[:, :, num_txt_tokens_pad:], value[:, :, num_txt_tokens_pad:]),
             attn_tokens=num_img_tokens,
         )
         fused_qkv_norm_rotary(
             encoder_hidden_states,
-            self.to_added_qkv,
-            self.norm_added_q,
-            self.norm_added_k,
+            attn.to_added_qkv,
+            attn.norm_added_q,
+            attn.norm_added_k,
             image_rotary_emb[1],
             output=(query[:, :, :num_txt_tokens_pad], key[:, :, :num_txt_tokens_pad], value[:, :, :num_txt_tokens_pad]),
             attn_tokens=num_txt_tokens,
@@ -284,36 +219,25 @@ class NunchakuFlux2Attention(nn.Module):
         attention_output = torch.empty(
             batch_size,
             num_tokens_pad,
-            self.heads * self.head_dim,
+            attn.heads * attn.head_dim,
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        attention_fp16_cuda(query, key, value, attention_output, self.head_dim ** (-0.5))
+        attention_fp16_cuda(query, key, value, attention_output, attn.head_dim ** (-0.5))
         encoder_hidden_states = attention_output[:, :num_txt_tokens]
         hidden_states = attention_output[:, num_txt_tokens_pad : num_txt_tokens_pad + num_img_tokens]
-        encoder_hidden_states = self.to_add_out(encoder_hidden_states)
-        hidden_states = self.to_out[0](hidden_states)
-        hidden_states = self.to_out[1](hidden_states)
+        encoder_hidden_states = attn.to_add_out(encoder_hidden_states)
+        hidden_states = attn.to_out[0](hidden_states)
+        hidden_states = attn.to_out[1](hidden_states)
         return hidden_states, encoder_hidden_states
 
     def _project_qkv(
         self,
+        attn: Flux2Attention,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor | None,
         image_rotary_emb: tuple[torch.Tensor, torch.Tensor] | torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
-        """Project image and optional text states to Q/K/V tensors.
-
-        Args:
-            hidden_states: Image hidden states.
-            encoder_hidden_states: Optional text/context states.
-            image_rotary_emb: Rotary data used by either packed native or
-                Diffusers fallback paths.
-
-        Returns:
-            Tuple ``(query, key, value, encoder_seq_len)``.
-        """
-
         batch_size = hidden_states.shape[0]
         packed_rotary = (
             isinstance(image_rotary_emb, tuple)
@@ -322,44 +246,44 @@ class NunchakuFlux2Attention(nn.Module):
             and image_rotary_emb[0].ndim == 3
         )
         if encoder_hidden_states is not None and packed_rotary:
-            qkv = fused_qkv_norm_rotary(hidden_states, self.to_qkv, self.norm_q, self.norm_k, image_rotary_emb[0])
+            qkv = fused_qkv_norm_rotary(hidden_states, attn.to_qkv, attn.norm_q, attn.norm_k, image_rotary_emb[0])
             query, key, value = qkv.chunk(3, dim=-1)
-            query = query.view(batch_size, -1, self.heads, self.head_dim)
-            key = key.view(batch_size, -1, self.heads, self.head_dim)
-            value = value.view(batch_size, -1, self.heads, self.head_dim)
+            query = query.view(batch_size, -1, attn.heads, attn.head_dim)
+            key = key.view(batch_size, -1, attn.heads, attn.head_dim)
+            value = value.view(batch_size, -1, attn.heads, attn.head_dim)
 
             encoder_qkv = fused_qkv_norm_rotary(
                 encoder_hidden_states,
-                self.to_added_qkv,
-                self.norm_added_q,
-                self.norm_added_k,
+                attn.to_added_qkv,
+                attn.norm_added_q,
+                attn.norm_added_k,
                 image_rotary_emb[1],
             )
             encoder_query, encoder_key, encoder_value = encoder_qkv.chunk(3, dim=-1)
-            encoder_query = encoder_query.view(batch_size, -1, self.heads, self.head_dim)
-            encoder_key = encoder_key.view(batch_size, -1, self.heads, self.head_dim)
-            encoder_value = encoder_value.view(batch_size, -1, self.heads, self.head_dim)
+            encoder_query = encoder_query.view(batch_size, -1, attn.heads, attn.head_dim)
+            encoder_key = encoder_key.view(batch_size, -1, attn.heads, attn.head_dim)
+            encoder_value = encoder_value.view(batch_size, -1, attn.heads, attn.head_dim)
             encoder_seq_len = encoder_hidden_states.shape[1]
             query = torch.cat([encoder_query, query], dim=1)
             key = torch.cat([encoder_key, key], dim=1)
             value = torch.cat([encoder_value, value], dim=1)
             return query, key, value, encoder_seq_len
 
-        query, key, value = self.to_qkv(hidden_states).chunk(3, dim=-1)
-        query = query.unflatten(-1, (self.heads, -1))
-        key = key.unflatten(-1, (self.heads, -1))
-        value = value.unflatten(-1, (self.heads, -1))
-        query = self.norm_q(query)
-        key = self.norm_k(key)
+        query, key, value = attn.to_qkv(hidden_states).chunk(3, dim=-1)
+        query = query.unflatten(-1, (attn.heads, -1))
+        key = key.unflatten(-1, (attn.heads, -1))
+        value = value.unflatten(-1, (attn.heads, -1))
+        query = attn.norm_q(query)
+        key = attn.norm_k(key)
         encoder_seq_len = 0
 
-        if encoder_hidden_states is not None and self.added_kv_proj_dim is not None:
-            encoder_query, encoder_key, encoder_value = self.to_added_qkv(encoder_hidden_states).chunk(3, dim=-1)
-            encoder_query = encoder_query.unflatten(-1, (self.heads, -1))
-            encoder_key = encoder_key.unflatten(-1, (self.heads, -1))
-            encoder_value = encoder_value.unflatten(-1, (self.heads, -1))
-            encoder_query = self.norm_added_q(encoder_query)
-            encoder_key = self.norm_added_k(encoder_key)
+        if encoder_hidden_states is not None and attn.added_kv_proj_dim is not None:
+            encoder_query, encoder_key, encoder_value = attn.to_added_qkv(encoder_hidden_states).chunk(3, dim=-1)
+            encoder_query = encoder_query.unflatten(-1, (attn.heads, -1))
+            encoder_key = encoder_key.unflatten(-1, (attn.heads, -1))
+            encoder_value = encoder_value.unflatten(-1, (attn.heads, -1))
+            encoder_query = attn.norm_added_q(encoder_query)
+            encoder_key = attn.norm_added_k(encoder_key)
             encoder_seq_len = encoder_hidden_states.shape[1]
             query = torch.cat([encoder_query, query], dim=1)
             key = torch.cat([encoder_key, key], dim=1)
@@ -371,57 +295,10 @@ class NunchakuFlux2Attention(nn.Module):
         return query, key, value, encoder_seq_len
 
 
-class NunchakuFlux2FeedForward(nn.Module):
-    """Quantized Flux2 feed-forward block."""
+class NunchakuFlux2Attention(nn.Module, AttentionModuleMixin):
+    """Flux2 cross-stream attention module with patched Nunchaku projections."""
 
-    def __init__(self, other: Flux2FeedForward, context: SVDQPatchContext | None = None, **kwargs):
-        """Replace feed-forward projections with SVDQ modules.
-
-        Args:
-            other: Source Diffusers Flux2 feed-forward module.
-            context: Shared SVDQ patch settings.
-            **kwargs: Additional SVDQ constructor overrides.
-
-        Returns:
-            None.
-        """
-
-        super().__init__()
-        self.linear_in = svdq_from_linear(other.linear_in, context, **kwargs)
-        self.act_fn = other.act_fn
-        self.linear_out = svdq_from_linear(other.linear_out, context, **kwargs)
-        self.linear_out.act_unsigned = False
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply the quantized feed-forward block.
-
-        Args:
-            x: Input hidden states.
-
-        Returns:
-            Feed-forward output tensor.
-        """
-
-        x = self.linear_in(x)
-        x = self.act_fn(x)
-        return self.linear_out(x)
-
-
-class NunchakuFlux2ParallelSelfAttention(nn.Module):
-    """Lite replacement for Flux2 parallel self-attention plus MLP blocks."""
-
-    def __init__(self, other: Flux2ParallelSelfAttention, context: SVDQPatchContext | None = None, **kwargs):
-        """Split Flux2 fused parallel projections into lite SVDQ modules.
-
-        Args:
-            other: Source Diffusers parallel self-attention module.
-            context: Shared SVDQ patch settings.
-            **kwargs: Additional SVDQ constructor overrides.
-
-        Returns:
-            None.
-        """
-
+    def __init__(self, other: Flux2Attention, context: SVDQPatchContext | None = None, **kwargs) -> None:
         super().__init__()
         self.head_dim = other.head_dim
         self.inner_dim = other.inner_dim
@@ -430,53 +307,69 @@ class NunchakuFlux2ParallelSelfAttention(nn.Module):
         self.heads = other.heads
         self.use_bias = other.use_bias
         self.dropout = other.dropout
-        self.mlp_ratio = other.mlp_ratio
-        self.mlp_hidden_dim = other.mlp_hidden_dim
-        self.mlp_mult_factor = other.mlp_mult_factor
-        processor = getattr(other, "processor", None)
-        self._attention_backend = getattr(processor, "_attention_backend", None)
-        self._parallel_config = getattr(processor, "_parallel_config", None)
+        self.added_kv_proj_dim = other.added_kv_proj_dim
+        self.added_proj_bias = other.added_proj_bias
 
-        with torch.device("meta"):
-            qkv_proj = nn.Linear(other.query_dim, other.inner_dim * 3, bias=other.use_bias)
-            mlp_fc1 = nn.Linear(other.query_dim, other.mlp_hidden_dim * other.mlp_mult_factor, bias=other.use_bias)
-            out_proj = nn.Linear(other.inner_dim, other.out_dim, bias=other.to_out.bias is not None)
-            mlp_fc2 = nn.Linear(other.mlp_hidden_dim, other.out_dim, bias=other.to_out.bias is not None)
-        device = other.to_qkv_mlp_proj.weight.device
-        self.qkv_proj = svdq_from_linear(qkv_proj, context, device=device, **kwargs)
-        self.mlp_fc1 = svdq_from_linear(mlp_fc1, context, device=device, **kwargs)
-        self.mlp_act_fn = other.mlp_act_fn
         self.norm_q = other.norm_q
         self.norm_k = other.norm_k
-        self.out_proj = svdq_from_linear(out_proj, context, device=device, **kwargs)
-        self.mlp_fc2 = svdq_from_linear(mlp_fc2, context, device=device, **kwargs)
-        self.mlp_fc2.act_unsigned = False
+        self.to_out = other.to_out
+        self.to_out[0] = svdq_from_linear(self.to_out[0], context, **kwargs)
+        with torch.device("meta"):
+            to_qkv = fuse_linears([other.to_q, other.to_k, other.to_v])
+        self.to_qkv = svdq_from_linear(to_qkv, context, **kwargs)
+
+        if self.added_kv_proj_dim is not None:
+            self.norm_added_q = other.norm_added_q
+            self.norm_added_k = other.norm_added_k
+            self.to_add_out = svdq_from_linear(other.to_add_out, context, **kwargs)
+            with torch.device("meta"):
+                to_added_qkv = fuse_linears([other.add_q_proj, other.add_k_proj, other.add_v_proj])
+            self.to_added_qkv = svdq_from_linear(to_added_qkv, context, **kwargs)
+
+        self.set_processor(NunchakuFlux2AttnProcessor(getattr(other, "processor", None)))
 
     def forward(
         self,
         hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor | None = None,
         attention_mask: torch.Tensor | None = None,
-        image_rotary_emb: torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None = None,
+        image_rotary_emb: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        """Run parallel self-attention and MLP.
+        attn_parameters = set(inspect.signature(self.processor.__call__).parameters.keys())
+        kwargs = {k: w for k, w in kwargs.items() if k in attn_parameters}
+        return self.processor(self, hidden_states, encoder_hidden_states, attention_mask, image_rotary_emb, **kwargs)
 
-        Args:
-            hidden_states: Joint hidden states.
-            attention_mask: Optional attention mask.
-            image_rotary_emb: Rotary tensor for fallback paths or packed rotary
-                tensor for native paths.
-            **kwargs: Optional KV-cache, text-token, and reference-token
-                controls.
 
-        Returns:
-            Sum of attention output projection and MLP projection.
-        """
+def _patch_flux2_feed_forward(ff: Flux2FeedForward, context: SVDQPatchContext | None = None, **kwargs):
+    """Patch a Diffusers Flux2 feed-forward module in place."""
 
-        kv_cache = kwargs.get("kv_cache", None)
-        kv_cache_mode = kwargs.get("kv_cache_mode", None)
-        num_txt_tokens = int(kwargs.get("num_txt_tokens", 0))
-        num_ref_tokens = int(kwargs.get("num_ref_tokens", 0))
+    patch_modules_recursively(
+        ff,
+        module_converters={nn.Linear: lambda linear: svdq_from_linear(linear, context, **kwargs)},
+    )
+    ff.linear_out.act_unsigned = False
+    return ff
+
+
+class NunchakuFlux2ParallelSelfAttnProcessor:
+    """Flux2 single-stream parallel attention processor using split SVDQ projections."""
+
+    def __init__(self, processor=None):
+        self._attention_backend = getattr(processor, "_attention_backend", None)
+        self._parallel_config = getattr(processor, "_parallel_config", None)
+
+    def __call__(
+        self,
+        attn: Flux2ParallelSelfAttention,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        image_rotary_emb: torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None = None,
+        kv_cache=None,
+        kv_cache_mode: str | None = None,
+        num_txt_tokens: int = 0,
+        num_ref_tokens: int = 0,
+    ) -> torch.Tensor:
         use_packed_fp16 = (
             kv_cache_mode is None
             and torch.is_tensor(image_rotary_emb)
@@ -484,23 +377,23 @@ class NunchakuFlux2ParallelSelfAttention(nn.Module):
             and hidden_states.is_cuda
         )
         if use_packed_fp16:
-            return self._forward_packed(hidden_states, image_rotary_emb)
+            return self._forward_packed(attn, hidden_states, image_rotary_emb)
 
         if torch.is_tensor(image_rotary_emb) and image_rotary_emb.ndim == 3:
             batch_size = hidden_states.shape[0]
-            qkv = fused_qkv_norm_rotary(hidden_states, self.qkv_proj, self.norm_q, self.norm_k, image_rotary_emb)
+            qkv = fused_qkv_norm_rotary(hidden_states, attn.qkv_proj, attn.norm_q, attn.norm_k, image_rotary_emb)
             query, key, value = qkv.chunk(3, dim=-1)
-            query = query.view(batch_size, -1, self.heads, self.head_dim)
-            key = key.view(batch_size, -1, self.heads, self.head_dim)
-            value = value.view(batch_size, -1, self.heads, self.head_dim)
+            query = query.view(batch_size, -1, attn.heads, attn.head_dim)
+            key = key.view(batch_size, -1, attn.heads, attn.head_dim)
+            value = value.view(batch_size, -1, attn.heads, attn.head_dim)
         else:
-            qkv = self.qkv_proj(hidden_states)
+            qkv = attn.qkv_proj(hidden_states)
             query, key, value = qkv.chunk(3, dim=-1)
-            query = query.unflatten(-1, (self.heads, -1))
-            key = key.unflatten(-1, (self.heads, -1))
-            value = value.unflatten(-1, (self.heads, -1))
-            query = self.norm_q(query)
-            key = self.norm_k(key)
+            query = query.unflatten(-1, (attn.heads, -1))
+            key = key.unflatten(-1, (attn.heads, -1))
+            value = value.unflatten(-1, (attn.heads, -1))
+            query = attn.norm_q(query)
+            key = attn.norm_k(key)
             if image_rotary_emb is not None:
                 query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
                 key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
@@ -528,30 +421,25 @@ class NunchakuFlux2ParallelSelfAttention(nn.Module):
                 parallel_config=self._parallel_config,
             )
         attn_output = attn_output.flatten(2, 3).to(query.dtype)
-        mlp_hidden_states = self.mlp_act_fn(self.mlp_fc1(hidden_states))
-        return self.out_proj(attn_output) + self.mlp_fc2(mlp_hidden_states)
+        mlp_hidden_states = attn.mlp_act_fn(attn.mlp_fc1(hidden_states))
+        return attn.out_proj(attn_output) + attn.mlp_fc2(mlp_hidden_states)
 
-    def _forward_packed(self, hidden_states: torch.Tensor, image_rotary_emb: torch.Tensor) -> torch.Tensor:
-        """Run padded native fp16 attention for a single packed sequence.
-
-        Args:
-            hidden_states: Joint hidden states.
-            image_rotary_emb: Packed rotary tensor for the joint sequence.
-
-        Returns:
-            Combined attention and MLP output.
-        """
-
+    def _forward_packed(
+        self,
+        attn: Flux2ParallelSelfAttention,
+        hidden_states: torch.Tensor,
+        image_rotary_emb: torch.Tensor,
+    ) -> torch.Tensor:
         batch_size = hidden_states.shape[0]
         num_tokens = hidden_states.shape[1]
         query, key, value, num_tokens_pad = _alloc_packed_qkv(
-            batch_size, self.heads, num_tokens, self.head_dim, hidden_states.device
+            batch_size, attn.heads, num_tokens, attn.head_dim, hidden_states.device
         )
         fused_qkv_norm_rotary(
             hidden_states,
-            self.qkv_proj,
-            self.norm_q,
-            self.norm_k,
+            attn.qkv_proj,
+            attn.norm_q,
+            attn.norm_k,
             image_rotary_emb,
             output=(query, key, value),
             attn_tokens=num_tokens,
@@ -559,166 +447,63 @@ class NunchakuFlux2ParallelSelfAttention(nn.Module):
         attn_output = torch.empty(
             batch_size,
             num_tokens_pad,
-            self.heads * self.head_dim,
+            attn.heads * attn.head_dim,
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        attention_fp16_cuda(query, key, value, attn_output, self.head_dim ** (-0.5))
+        attention_fp16_cuda(query, key, value, attn_output, attn.head_dim ** (-0.5))
         attn_output = attn_output[:, :num_tokens]
-        mlp_hidden_states = self.mlp_act_fn(self.mlp_fc1(hidden_states))
-        return self.out_proj(attn_output) + self.mlp_fc2(mlp_hidden_states)
+        mlp_hidden_states = attn.mlp_act_fn(attn.mlp_fc1(hidden_states))
+        return attn.out_proj(attn_output) + attn.mlp_fc2(mlp_hidden_states)
 
 
-class NunchakuFlux2TransformerBlock(nn.Module):
-    """Lite replacement for Flux2 double-stream transformer blocks."""
+class NunchakuFlux2ParallelSelfAttention(nn.Module, AttentionModuleMixin):
+    """Flux2 parallel self-attention module with split Nunchaku projections."""
 
-    def __init__(self, block: Flux2TransformerBlock, context: SVDQPatchContext | None = None, **kwargs):
-        """Replace double-stream attention and feed-forward modules.
-
-        Args:
-            block: Source Diffusers Flux2 double-stream block.
-            context: Shared SVDQ patch settings.
-            **kwargs: Additional SVDQ constructor overrides.
-
-        Returns:
-            None.
-        """
-
+    def __init__(
+        self,
+        other: Flux2ParallelSelfAttention,
+        context: SVDQPatchContext | None = None,
+        **kwargs,
+    ) -> None:
         super().__init__()
-        self.mlp_hidden_dim = block.mlp_hidden_dim
-        self.norm1 = block.norm1
-        self.norm1_context = block.norm1_context
-        self.attn = NunchakuFlux2Attention(block.attn, context=context, **kwargs)
-        self.norm2 = block.norm2
-        self.ff = NunchakuFlux2FeedForward(block.ff, context=context, **kwargs)
-        self.norm2_context = block.norm2_context
-        self.ff_context = NunchakuFlux2FeedForward(block.ff_context, context=context, **kwargs)
+        self.head_dim = other.head_dim
+        self.inner_dim = other.inner_dim
+        self.query_dim = other.query_dim
+        self.out_dim = other.out_dim
+        self.heads = other.heads
+        self.use_bias = other.use_bias
+        self.dropout = other.dropout
+        self.mlp_ratio = other.mlp_ratio
+        self.mlp_hidden_dim = other.mlp_hidden_dim
+        self.mlp_mult_factor = other.mlp_mult_factor
+
+        with torch.device("meta"):
+            qkv_proj = nn.Linear(other.query_dim, other.inner_dim * 3, bias=other.use_bias)
+            mlp_fc1 = nn.Linear(other.query_dim, other.mlp_hidden_dim * other.mlp_mult_factor, bias=other.use_bias)
+            out_proj = nn.Linear(other.inner_dim, other.out_dim, bias=other.to_out.bias is not None)
+            mlp_fc2 = nn.Linear(other.mlp_hidden_dim, other.out_dim, bias=other.to_out.bias is not None)
+        device = other.to_qkv_mlp_proj.weight.device
+        self.qkv_proj = svdq_from_linear(qkv_proj, context, device=device, **kwargs)
+        self.mlp_fc1 = svdq_from_linear(mlp_fc1, context, device=device, **kwargs)
+        self.mlp_act_fn = other.mlp_act_fn
+        self.norm_q = other.norm_q
+        self.norm_k = other.norm_k
+        self.out_proj = svdq_from_linear(out_proj, context, device=device, **kwargs)
+        self.mlp_fc2 = svdq_from_linear(mlp_fc2, context, device=device, **kwargs)
+        self.mlp_fc2.act_unsigned = False
+        self.set_processor(NunchakuFlux2ParallelSelfAttnProcessor(getattr(other, "processor", None)))
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        encoder_hidden_states: torch.Tensor,
-        temb_mod_img: torch.Tensor,
-        temb_mod_txt: torch.Tensor,
-        image_rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
-        joint_attention_kwargs: dict[str, Any] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run one Flux2 double-stream block over image and text states.
-
-        Args:
-            hidden_states: Image hidden states.
-            encoder_hidden_states: Text/context hidden states.
-            temb_mod_img: Image modulation tensor.
-            temb_mod_txt: Text modulation tensor.
-            image_rotary_emb: Packed ``(image_rope, text_rope)`` tuple.
-            joint_attention_kwargs: Optional attention kwargs.
-
-        Returns:
-            Tuple ``(encoder_hidden_states, hidden_states)`` after the block.
-        """
-
-        joint_attention_kwargs = joint_attention_kwargs or {}
-        (shift_msa, scale_msa, gate_msa), (shift_mlp, scale_mlp, gate_mlp) = Flux2Modulation.split(temb_mod_img, 2)
-        (c_shift_msa, c_scale_msa, c_gate_msa), (c_shift_mlp, c_scale_mlp, c_gate_mlp) = Flux2Modulation.split(
-            temb_mod_txt, 2
-        )
-
-        norm_hidden_states = self.norm1(hidden_states)
-        norm_hidden_states = (1 + scale_msa) * norm_hidden_states + shift_msa
-        norm_encoder_hidden_states = self.norm1_context(encoder_hidden_states)
-        norm_encoder_hidden_states = (1 + c_scale_msa) * norm_encoder_hidden_states + c_shift_msa
-
-        attn_output, context_attn_output = self.attn(
-            hidden_states=norm_hidden_states,
-            encoder_hidden_states=norm_encoder_hidden_states,
-            image_rotary_emb=image_rotary_emb,
-            **joint_attention_kwargs,
-        )
-
-        hidden_states = _apply_gated_residual(hidden_states, gate_msa, attn_output)
-        norm_hidden_states = self.norm2(hidden_states)
-        norm_hidden_states = norm_hidden_states * (1 + scale_mlp) + shift_mlp
-        hidden_states = _apply_gated_residual(hidden_states, gate_mlp, self.ff(norm_hidden_states))
-
-        encoder_hidden_states = _apply_gated_residual(encoder_hidden_states, c_gate_msa, context_attn_output)
-        norm_encoder_hidden_states = self.norm2_context(encoder_hidden_states)
-        norm_encoder_hidden_states = norm_encoder_hidden_states * (1 + c_scale_mlp) + c_shift_mlp
-        encoder_hidden_states = _apply_gated_residual(
-            encoder_hidden_states, c_gate_mlp, self.ff_context(norm_encoder_hidden_states)
-        )
-        if encoder_hidden_states.dtype == torch.float16:
-            encoder_hidden_states = encoder_hidden_states.clip(-65504, 65504)
-        return encoder_hidden_states, hidden_states
-
-
-class NunchakuFlux2SingleTransformerBlock(nn.Module):
-    """Lite replacement for Flux2 single-stream transformer blocks."""
-
-    def __init__(self, block: Flux2SingleTransformerBlock, context: SVDQPatchContext | None = None, **kwargs):
-        """Replace the single-stream parallel attention module.
-
-        Args:
-            block: Source Diffusers Flux2 single-stream block.
-            context: Shared SVDQ patch settings.
-            **kwargs: Additional SVDQ constructor overrides.
-
-        Returns:
-            None.
-        """
-
-        super().__init__()
-        self.norm = block.norm
-        self.attn = NunchakuFlux2ParallelSelfAttention(block.attn, context=context, **kwargs)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        encoder_hidden_states: torch.Tensor | None,
-        temb_mod: torch.Tensor,
-        image_rotary_emb: tuple[torch.Tensor, torch.Tensor] | torch.Tensor | None = None,
-        joint_attention_kwargs: dict[str, Any] | None = None,
-        split_hidden_states: bool = False,
-        text_seq_len: int | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
-        """Run one Flux2 single-stream block and optionally split text/image states.
-
-        Args:
-            hidden_states: Joint or image hidden states.
-            encoder_hidden_states: Optional text/context states to concatenate
-                before the block.
-            temb_mod: Single-stream modulation tensor.
-            image_rotary_emb: Rotary tensor for the joint sequence.
-            joint_attention_kwargs: Optional attention kwargs.
-            split_hidden_states: Whether to split text and image streams before
-                returning.
-            text_seq_len: Text token count used when splitting a pre-concatenated
-                sequence.
-
-        Returns:
-            Joint hidden states, or ``(encoder_hidden_states, hidden_states)``
-            when ``split_hidden_states`` is true.
-        """
-
-        if encoder_hidden_states is not None:
-            text_seq_len = encoder_hidden_states.shape[1]
-            hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
-
-        mod_shift, mod_scale, mod_gate = Flux2Modulation.split(temb_mod, 1)[0]
-        norm_hidden_states = self.norm(hidden_states)
-        norm_hidden_states = (1 + mod_scale) * norm_hidden_states + mod_shift
-        attn_output = self.attn(
-            hidden_states=norm_hidden_states,
-            image_rotary_emb=image_rotary_emb,
-            **(joint_attention_kwargs or {}),
-        )
-        hidden_states = _apply_gated_residual(hidden_states, mod_gate, attn_output)
-        if hidden_states.dtype == torch.float16:
-            hidden_states = hidden_states.clip(-65504, 65504)
-
-        if split_hidden_states:
-            encoder_hidden_states, hidden_states = hidden_states[:, :text_seq_len], hidden_states[:, text_seq_len:]
-            return encoder_hidden_states, hidden_states
-        return hidden_states
+        attention_mask: torch.Tensor | None = None,
+        image_rotary_emb: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        attn_parameters = set(inspect.signature(self.processor.__call__).parameters.keys())
+        kwargs = {k: w for k, w in kwargs.items() if k in attn_parameters}
+        return self.processor(self, hidden_states, attention_mask, image_rotary_emb, **kwargs)
 
 
 def lite_flux2_forward(
@@ -736,28 +521,7 @@ def lite_flux2_forward(
     num_ref_tokens: int = 0,
     ref_fixed_timestep: float = 0.0,
 ) -> torch.Tensor | Transformer2DModelOutput:
-    """Flux2 transformer forward wrapper that pre-packs RoPE for lite modules.
-
-    Args:
-        self: Patched Flux2 transformer instance.
-        hidden_states: Input image latents.
-        encoder_hidden_states: Text/context hidden states.
-        timestep: Diffusion timestep tensor.
-        img_ids: Image token position ids.
-        txt_ids: Text token position ids.
-        guidance: Optional guidance tensor.
-        joint_attention_kwargs: Optional kwargs forwarded to attention blocks.
-        return_dict: Whether to return ``Transformer2DModelOutput``.
-        kv_cache: Optional KV cache object for fallback cached modes.
-        kv_cache_mode: Optional cache mode. Non-``None`` delegates to the
-            original Diffusers forward.
-        num_ref_tokens: Number of reference tokens for cached modes.
-        ref_fixed_timestep: Reference timestep value for cached modes.
-
-    Returns:
-        Diffusers transformer output object, or tuple when ``return_dict`` is
-        false.
-    """
+    """Run Flux2 with pre-packed RoPE tensors for Nunchaku kernels."""
 
     if kv_cache_mode is not None:
         return self._nunchaku_lite_flux2_original_forward(
@@ -938,10 +702,9 @@ class Flux2Adapter:
             transformer,
             skips=lambda _path, module: isinstance(module, nn.Linear),
             module_converters={
-                Flux2TransformerBlock: lambda block: NunchakuFlux2TransformerBlock(block, context=context),
-                Flux2SingleTransformerBlock: lambda block: NunchakuFlux2SingleTransformerBlock(
-                    block, context=context
-                ),
+                Flux2Attention: lambda attn: NunchakuFlux2Attention(attn, context=context),
+                Flux2FeedForward: lambda ff: _patch_flux2_feed_forward(ff, context=context),
+                Flux2ParallelSelfAttention: lambda attn: NunchakuFlux2ParallelSelfAttention(attn, context=context),
             },
         )
 

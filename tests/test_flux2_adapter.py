@@ -6,7 +6,12 @@ from safetensors.torch import save_file
 
 from diffusers import Flux2Transformer2DModel
 from nunchaku_lite import patch_transformer
-from nunchaku_lite.adapters.flux2 import Flux2Adapter, NunchakuFlux2Attention, _pack_flux2_rotary_emb
+from nunchaku_lite.adapters.flux2 import (
+    Flux2Adapter,
+    NunchakuFlux2Attention,
+    _pack_flux2_rotary_emb,
+)
+from nunchaku_lite.linear import SVDQW4A4Linear
 
 
 def make_tiny_flux2_transformer():
@@ -63,9 +68,13 @@ def test_patch_transformer_patches_flux2_from_synthetic_checkpoint(tmp_path):
     assert returned is transformer
     assert transformer._nunchaku_lite_patched
     assert transformer._nunchaku_lite_target == "flux2"
-    assert transformer.transformer_blocks[0].__class__.__name__ == "NunchakuFlux2TransformerBlock"
-    assert transformer.single_transformer_blocks[0].__class__.__name__ == "NunchakuFlux2SingleTransformerBlock"
+    assert transformer.transformer_blocks[0].__class__.__name__ == "Flux2TransformerBlock"
+    assert transformer.single_transformer_blocks[0].__class__.__name__ == "Flux2SingleTransformerBlock"
     assert isinstance(transformer.transformer_blocks[0].attn, NunchakuFlux2Attention)
+    assert isinstance(transformer.transformer_blocks[0].attn.to_qkv, SVDQW4A4Linear)
+    assert isinstance(transformer.transformer_blocks[0].ff.linear_in, SVDQW4A4Linear)
+    assert isinstance(transformer.single_transformer_blocks[0].attn.qkv_proj, SVDQW4A4Linear)
+    assert not hasattr(transformer.single_transformer_blocks[0].attn, "to_qkv_mlp_proj")
     assert hasattr(transformer, "_nunchaku_lite_flux2_original_forward")
 
 

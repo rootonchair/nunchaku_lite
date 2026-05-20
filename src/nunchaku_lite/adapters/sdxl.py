@@ -6,7 +6,7 @@ from collections.abc import Mapping, MutableMapping
 from typing import Any
 
 import torch
-from diffusers.models.attention import BasicTransformerBlock
+from diffusers.models.attention import AttentionModuleMixin, BasicTransformerBlock
 from diffusers.models.unets.unet_2d_blocks import (
     CrossAttnDownBlock2D,
     CrossAttnUpBlock2D,
@@ -56,7 +56,7 @@ def _sdxl_state_dict_needs_conversion(state_dict: Mapping[str, torch.Tensor]) ->
     )
 
 
-class NunchakuSDXLAttention(nn.Module):
+class NunchakuSDXLAttention(nn.Module, AttentionModuleMixin):
     """Attention module compatible with Diffusers SDXL BasicTransformerBlock."""
 
     def __init__(self, attention: nn.Module, context: SVDQPatchContext) -> None:

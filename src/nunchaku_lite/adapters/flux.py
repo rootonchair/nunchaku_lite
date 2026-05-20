@@ -4,7 +4,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from diffusers.models.attention import FeedForward
+from diffusers.models.attention import AttentionModuleMixin, FeedForward
 from diffusers.models.normalization import AdaLayerNormZero, AdaLayerNormZeroSingle
 from diffusers.models.transformers.transformer_flux import (
     FluxAttention,
@@ -476,46 +476,61 @@ class NunchakuFluxAttnProcessor(nn.Module):
         return query, key, value
 
 
-class NunchakuFluxAttention:
-    """Patch Diffusers Flux attention modules in place for Nunchaku kernels."""
+class NunchakuFluxAttention(nn.Module, AttentionModuleMixin):
+    """Flux attention module with patched Nunchaku projections."""
 
-    def __new__(
-        cls,
+    def __init__(
+        self,
         other: FluxAttention,
         processor: str | nn.Module | None = None,
         context: SVDQPatchContext | None = None,
         *,
         patch_output: bool = True,
         **kwargs,
-    ) -> FluxAttention:
-        attn = other
-        if getattr(attn, "_nunchaku_lite_flux_attention_patched", False):
-            if processor is not None:
-                attn.set_processor(_flux_attention_processor(processor))
-            return attn
+    ) -> None:
+        super().__init__()
+        self.head_dim = other.head_dim
+        self.inner_dim = other.inner_dim
+        self.query_dim = other.query_dim
+        self.use_bias = other.use_bias
+        self.dropout = other.dropout
+        self.out_dim = other.out_dim
+        self.context_pre_only = other.context_pre_only
+        self.pre_only = other.pre_only
+        self.heads = other.heads
+        self.added_kv_proj_dim = other.added_kv_proj_dim
+        self.added_proj_bias = other.added_proj_bias
+
+        self.norm_q = other.norm_q
+        self.norm_k = other.norm_k
 
         with torch.device("meta"):
-            to_qkv = fuse_linears([attn.to_q, attn.to_k, attn.to_v])
-        attn.to_qkv = svdq_from_linear(to_qkv, context, **kwargs)
-        delattr(attn, "to_q")
-        delattr(attn, "to_k")
-        delattr(attn, "to_v")
+            to_qkv = fuse_linears([other.to_q, other.to_k, other.to_v])
+        self.to_qkv = svdq_from_linear(to_qkv, context, **kwargs)
 
-        if patch_output and not attn.pre_only:
-            attn.to_out[0] = svdq_from_linear(attn.to_out[0], context, **kwargs)
+        if patch_output and not self.pre_only:
+            self.to_out = other.to_out
+            self.to_out[0] = svdq_from_linear(self.to_out[0], context, **kwargs)
 
-        if attn.added_kv_proj_dim is not None:
+        if self.added_kv_proj_dim is not None:
+            self.norm_added_q = other.norm_added_q
+            self.norm_added_k = other.norm_added_k
             with torch.device("meta"):
-                add_qkv_proj = fuse_linears([attn.add_q_proj, attn.add_k_proj, attn.add_v_proj])
-            attn.add_qkv_proj = svdq_from_linear(add_qkv_proj, context, **kwargs)
-            attn.to_add_out = svdq_from_linear(attn.to_add_out, context, **kwargs)
-            delattr(attn, "add_q_proj")
-            delattr(attn, "add_k_proj")
-            delattr(attn, "add_v_proj")
+                add_qkv_proj = fuse_linears([other.add_q_proj, other.add_k_proj, other.add_v_proj])
+            self.add_qkv_proj = svdq_from_linear(add_qkv_proj, context, **kwargs)
+            self.to_add_out = svdq_from_linear(other.to_add_out, context, **kwargs)
 
-        attn.set_processor(_flux_attention_processor(attn.processor if processor is None else processor))
-        attn._nunchaku_lite_flux_attention_patched = True
-        return attn
+        self.set_processor(_flux_attention_processor(other.processor if processor is None else processor))
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        image_rotary_emb: tuple[torch.Tensor, torch.Tensor] | torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        return self.processor(self, hidden_states, encoder_hidden_states, attention_mask, image_rotary_emb, **kwargs)
 
 
 def _flux_attention_processor(processor) -> NunchakuFluxAttnProcessor:

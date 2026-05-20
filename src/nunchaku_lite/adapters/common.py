@@ -6,6 +6,7 @@ from typing import Callable
 
 import torch
 import torch.nn as nn
+from diffusers.models.attention import AttentionModuleMixin
 from diffusers.models.attention_processor import Attention
 
 from ..linear import SVDQW4A4Linear
@@ -181,7 +182,7 @@ def svdq_from_linear(
     return _mark_patched_module(SVDQW4A4Linear.from_linear(linear, **_linear_kwargs(context, kwargs)))
 
 
-class NunchakuAttention(nn.Module):
+class NunchakuAttention(nn.Module, AttentionModuleMixin):
     """Generic Nunchaku Lite replacement for Diffusers attention modules.
 
     The class is intended for generic Diffusers attention modules whose forward
